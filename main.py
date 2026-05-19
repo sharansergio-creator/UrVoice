@@ -7,6 +7,7 @@ import base64
 import httpx
 import wave
 import io
+import asyncio
 import numpy as np
 from dotenv import load_dotenv
 
@@ -112,6 +113,11 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
             }
             await websocket.send_text(json.dumps(message))
             print(f"Sent audio response for: {text[:50]}")
+
+            # Wait for audio to finish playing before accepting new input
+            word_count = len(text.split())
+            wait_time = max(1.5, word_count * 0.4)
+            await asyncio.sleep(wait_time)
     except Exception as e:
         print(f"Send audio error: {e}")
 
@@ -283,7 +289,7 @@ async def get_ai_response(transcript: str) -> str:
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are UrVoice, an AI phone assistant. Keep responses short, under 2 sentences. Be helpful and professional. If you cannot understand what the caller said or it seems garbled or unclear, respond with: 'Sorry, I didn't catch that clearly. Could you please repeat?' Do not guess unclear words."
+                            "content": "You are UrVoice, an AI phone assistant. Keep responses short, under 2 sentences. Be helpful and professional. Only ask the caller to repeat if the message is completely unintelligible gibberish. Short phrases, single words, and partial sentences are valid — respond to them normally."
                         },
                         {
                             "role": "user",
