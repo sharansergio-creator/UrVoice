@@ -38,6 +38,7 @@ async def audio_stream(websocket: WebSocket):
     stream_sid = None
     speaking = False
     silence_frames = 0
+    is_playing = False
     SILENCE_LIMIT = 25
     RMS_THRESHOLD = 300
 
@@ -49,12 +50,17 @@ async def audio_stream(websocket: WebSocket):
             if data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
                 print(f"Stream started: {stream_sid}")
+                is_playing = True
                 await send_audio_response(
                     websocket, stream_sid,
                     "Hello! You have reached UrVoice. How can I help you today?"
                 )
+                is_playing = False
 
             elif data["event"] == "media":
+                if is_playing:
+                    continue
+
                 raw_chunk = base64.b64decode(data["media"]["payload"])
                 audio_chunks.append(data["media"]["payload"])
 
@@ -82,7 +88,9 @@ async def audio_stream(websocket: WebSocket):
                             ai_response = await get_ai_response(transcript)
                             print(f"AI response: {ai_response}")
                             if ai_response and stream_sid:
+                                is_playing = True
                                 await send_audio_response(websocket, stream_sid, ai_response)
+                                is_playing = False
 
             elif data["event"] == "stop":
                 print("Stream stopped")
@@ -90,7 +98,7 @@ async def audio_stream(websocket: WebSocket):
 
     except Exception as e:
         print(f"WebSocket error: {e}")
-
+        
 async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
     try:
         audio_bytes = await text_to_speech(text)
