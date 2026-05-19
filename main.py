@@ -142,15 +142,30 @@ async def text_to_speech(text: str) -> bytes:
         return None
 
 def pcm_to_mulaw(pcm_bytes: bytes) -> bytes:
+    MULAW_MAX = 0x1FFF
+    MULAW_BIAS = 33
+    
     samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
-    samples = np.clip(samples, -32768, 32767)
+    
+    # Get sign and magnitude
     sign = np.where(samples < 0, 0x80, 0x00)
     samples = np.abs(samples)
-    samples = samples + 132
+    
+    # Clamp and add bias
     samples = np.clip(samples, 0, 32767)
-    exp = np.floor(np.log2(samples + 1)).astype(np.int32)
-    exp = np.clip(exp, 0, 7)
-    mantissa = ((samples >> (exp + 3)) & 0x0F).astype(np.int32)
+    samples = samples + MULAW_BIAS
+    samples = np.clip(samples, 0, MULAW_MAX)
+    
+    # Find exponent
+    exp = np.zeros(len(samples), dtype=np.int32)
+    for i in range(7, -1, -1):
+        mask = samples >= (1 << (i + 5))
+        exp = np.where(mask & (exp == 0), i, exp)
+    
+    # Get mantissa
+    mantissa = (samples >> (exp + 1)) & 0x0F
+    
+    # Combine and invert
     mulaw = ~(sign | (exp << 4) | mantissa)
     return (mulaw & 0xFF).astype(np.uint8).tobytes()
 
