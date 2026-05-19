@@ -8,8 +8,12 @@ import httpx
 import wave
 import io
 import asyncio
+import uuid
 import numpy as np
 from dotenv import load_dotenv
+import firebase_admin
+from firebase_admin import credentials, firestore
+from google.cloud.firestore import SERVER_TIMESTAMP
 
 load_dotenv()
 
@@ -17,6 +21,40 @@ app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Initialize Firebase Admin SDK
+_firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
+if _firebase_creds_json and not firebase_admin._apps:
+    _cred = credentials.Certificate(json.loads(_firebase_creds_json))
+    firebase_admin.initialize_app(_cred)
+
+def get_db():
+    return firestore.client()
+
+async def log_call_to_firestore(
+    caller_number: str,
+    transcript: str,
+    ai_response: str,
+    language: str,
+):
+    """Persist a completed call exchange to Firestore call_logs collection."""
+    try:
+        db = get_db()
+        doc = {
+            "callId": str(uuid.uuid4()),
+            "userId": "test_user",
+            "callerNumber": caller_number or "unknown",
+            "transcript": transcript,
+            "aiResponse": ai_response,
+            "language": language,
+            "timestamp": SERVER_TIMESTAMP,
+            "category": "CUSTOMER",
+            "duration": 0,
+        }
+        db.collection("call_logs").add(doc)
+        print(f"Call log saved for {caller_number}")
+    except Exception as e:
+        print(f"Firestore log error: {e}")
 
 @app.get("/")
 def root():
@@ -36,6 +74,7 @@ async def audio_stream(websocket: WebSocket):
     await websocket.accept()
     audio_chunks = []
     stream_sid = None
+    caller_number = None
     speaking = False
     silence_frames = 0
     is_playing = False
@@ -50,7 +89,9 @@ async def audio_stream(websocket: WebSocket):
 
             if data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
-                print(f"Stream started: {stream_sid}")
+                caller_number = data["start"].get("customParameters", {}).get("from") or \
+                                data["start"].get("from") or "unknown"
+                print(f"Stream started: {stream_sid}, caller: {caller_number}")
                 is_playing = True
                 await send_audio_response(
                     websocket, stream_sid,
@@ -94,6 +135,13 @@ async def audio_stream(websocket: WebSocket):
                                 is_playing = True
                                 await send_audio_response(websocket, stream_sid, ai_response)
                                 is_playing = False
+                                detected_lang = detect_language(transcript)
+                                asyncio.create_task(log_call_to_firestore(
+                                    caller_number=caller_number,
+                                    transcript=transcript,
+                                    ai_response=ai_response,
+                                    language=detected_lang,
+                                ))
 
             elif data["event"] == "stop":
                 print("Stream stopped")

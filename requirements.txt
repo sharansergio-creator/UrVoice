@@ -6,3 +6,4 @@ httpx
 websockets
 numpy
 cartesia
+firebase-admin
