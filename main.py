@@ -40,7 +40,7 @@ async def audio_stream(websocket: WebSocket):
     silence_frames = 0
     is_playing = False
     SILENCE_LIMIT = 15
-    RMS_THRESHOLD = 300
+    RMS_THRESHOLD = 400
 
     try:
         while True:
@@ -251,7 +251,7 @@ async def get_ai_response(transcript: str) -> str:
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are UrVoice, an AI phone assistant. Keep responses short, under 2 sentences. Be helpful and professional. Only ask the caller to repeat if the message is completely unintelligible gibberish. Short phrases, single words, and partial sentences are valid — respond to them normally."
+                            "content":"You are UrVoice, an AI phone assistant for Indian users. Keep responses short, under 2 sentences. Be helpful and professional. Users often speak Kanglish (Kannada + English mixed), Hinglish, or Tanglish — understand and respond in the same language mix the user is using. Kannada script may contain English words written phonetically — treat this as valid speech and respond normally. Only say you didn't understand if the message is pure random noise with no recognizable words at all."
                         },
                         {
                             "role": "user",
