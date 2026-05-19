@@ -17,7 +17,6 @@ app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
 
 @app.get("/")
 def root():
@@ -114,7 +113,6 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
             await websocket.send_text(json.dumps(message))
             print(f"Sent audio response for: {text[:50]}")
 
-            # Wait for audio to finish playing before accepting new input
             word_count = len(text.split())
             wait_time = max(1.5, word_count * 0.4)
             await asyncio.sleep(wait_time)
@@ -132,48 +130,11 @@ def detect_language(text: str) -> str:
             return "ta-IN"
         if 0x0C00 <= code <= 0x0C7F:
             return "te-IN"
-    return "en"
+    return "en-IN"
 
 async def text_to_speech(text: str) -> bytes:
     language = detect_language(text)
-    if language == "en":
-        return await cartesia_tts(text)
-    else:
-        return await sarvam_tts(text, language)
-
-async def cartesia_tts(text: str) -> bytes:
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.cartesia.ai/tts/bytes",
-                headers={
-                    "Cartesia-Version": "2024-06-10",
-                    "X-API-Key": CARTESIA_API_KEY,
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "transcript": text,
-                    "model_id": "sonic-english",
-                    "voice": {
-                        "mode": "id",
-                        "id": "79a125e8-cd45-4c13-8a67-188112f4dd22"
-                    },
-                    "output_format": {
-                        "container": "raw",
-                        "encoding": "pcm_s16le",
-                        "sample_rate": 8000
-                    }
-                },
-                timeout=30
-            )
-            if response.status_code == 200:
-                return response.content
-            else:
-                print(f"Cartesia error: {response.status_code} {response.text}")
-                return None
-    except Exception as e:
-        print(f"Cartesia TTS error: {e}")
-        return None
+    return await sarvam_tts(text, language)
 
 async def sarvam_tts(text: str, language_code: str) -> bytes:
     try:
@@ -191,7 +152,8 @@ async def sarvam_tts(text: str, language_code: str) -> bytes:
                     "model": "bulbul:v2",
                     "speech_sample_rate": 8000,
                     "enable_preprocessing": True,
-                    "output_audio_codec": "wav"
+                    "output_audio_codec": "wav",
+                    "pace": 0.9
                 },
                 timeout=30
             )
