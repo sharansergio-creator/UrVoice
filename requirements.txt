@@ -3,3 +3,4 @@ uvicorn
 twilio
 python-dotenv
 httpx
+websockets
