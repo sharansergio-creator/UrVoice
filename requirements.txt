@@ -4,3 +4,4 @@ twilio
 python-dotenv
 httpx
 websockets
+numpy

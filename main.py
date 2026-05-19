@@ -5,9 +5,9 @@ import os
 import json
 import base64
 import httpx
-import audioop
 import wave
 import io
+import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,7 +56,17 @@ async def audio_stream(websocket: WebSocket):
         print(f"WebSocket error: {e}")
 
 def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
-    pcm = audioop.ulaw2lin(mulaw_bytes, 2)
+    mulaw_array = np.frombuffer(mulaw_bytes, dtype=np.uint8)
+    # Decode mulaw to 16-bit PCM
+    mulaw_array = mulaw_array.astype(np.int32)
+    mulaw_array = ~mulaw_array
+    sign = mulaw_array & 0x80
+    exponent = (mulaw_array >> 4) & 0x07
+    mantissa = mulaw_array & 0x0F
+    sample = ((mantissa << 3) + 0x84) << exponent
+    sample = np.where(sign != 0, 0x84 - sample, sample - 0x84)
+    pcm = sample.astype(np.int16).tobytes()
+    
     buf = io.BytesIO()
     with wave.open(buf, 'wb') as wf:
         wf.setnchannels(1)
