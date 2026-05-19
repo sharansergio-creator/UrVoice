@@ -5,6 +5,9 @@ import os
 import json
 import base64
 import httpx
+import audioop
+import wave
+import io
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,28 +35,35 @@ async def incoming_call(request: Request):
 async def audio_stream(websocket: WebSocket):
     await websocket.accept()
     audio_chunks = []
-    
+
     try:
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
-            
+
             if data["event"] == "media":
                 audio_chunks.append(data["media"]["payload"])
-            
+
             elif data["event"] == "stop":
                 if audio_chunks:
-                    # Combine all audio chunks
-                    combined = b"".join(base64.b64decode(chunk) for chunk in audio_chunks)
-                    
-                    # Send to Sarvam STT
-                    transcript = await transcribe(combined)
+                    raw_mulaw = b"".join(base64.b64decode(chunk) for chunk in audio_chunks)
+                    wav_bytes = mulaw_to_wav(raw_mulaw)
+                    transcript = await transcribe(wav_bytes)
                     print(f"Caller said: {transcript}")
-                
                 break
-                
+
     except Exception as e:
         print(f"WebSocket error: {e}")
+
+def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
+    pcm = audioop.ulaw2lin(mulaw_bytes, 2)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(8000)
+        wf.writeframes(pcm)
+    return buf.getvalue()
 
 async def transcribe(audio_bytes: bytes) -> str:
     try:
@@ -65,6 +75,7 @@ async def transcribe(audio_bytes: bytes) -> str:
                 data={"language_code": "unknown", "model": "saaras:v2"},
                 timeout=30
             )
+            print(f"Sarvam response: {response.status_code} {response.text}")
             result = response.json()
             return result.get("transcript", "")
     except Exception as e:
