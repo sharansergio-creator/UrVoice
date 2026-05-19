@@ -7,3 +7,4 @@ websockets
 numpy
 cartesia
 webrtcvad
+setuptools
