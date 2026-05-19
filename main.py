@@ -247,7 +247,7 @@ async def transcribe(audio_bytes: bytes) -> str:
                 "https://api.sarvam.ai/speech-to-text",
                 headers={"api-subscription-key": SARVAM_API_KEY},
                 files={"file": ("audio.wav", audio_bytes, "audio/wav")},
-                data={"language_code": "unknown", "model": "saarika:v2.5"},
+                data={"language_code": "en-IN", "model": "saarika:v2.5"},
                 timeout=30
             )
             result = response.json()
