@@ -38,7 +38,9 @@ async def audio_stream(websocket: WebSocket):
     stream_sid = None
     speaking = False
     silence_count = 0
-    SILENCE_THRESHOLD = 20
+    SILENCE_THRESHOLD = 30
+    SPEECH_ENERGY = 68
+    SILENCE_ENERGY = 58
 
     try:
         while True:
@@ -56,27 +58,26 @@ async def audio_stream(websocket: WebSocket):
             elif data["event"] == "media":
                 chunk = base64.b64decode(data["media"]["payload"])
                 audio_chunks.append(data["media"]["payload"])
-                
+
                 samples = np.frombuffer(chunk, dtype=np.uint8).astype(np.int32)
                 energy = np.mean(np.abs(samples - 128))
-                print(f"Energy: {energy:.2f}, speaking: {speaking}, silence: {silence_count}")
-                
-                if energy > 5:
+
+                if energy > SPEECH_ENERGY:
                     speaking = True
                     silence_count = 0
-                elif speaking:
+                elif energy < SILENCE_ENERGY and speaking:
                     silence_count += 1
                     if silence_count >= SILENCE_THRESHOLD:
                         speaking = False
                         chunks_to_process = audio_chunks.copy()
                         audio_chunks.clear()
                         silence_count = 0
-                        
+
                         raw_mulaw = b"".join(base64.b64decode(c) for c in chunks_to_process)
                         wav_bytes = mulaw_to_wav(raw_mulaw)
                         transcript = await transcribe(wav_bytes)
                         print(f"Caller said: {transcript}")
-                        
+
                         if transcript and transcript.strip():
                             ai_response = await get_ai_response(transcript)
                             print(f"AI response: {ai_response}")
@@ -94,10 +95,8 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
     try:
         audio_bytes = await text_to_speech(text)
         if audio_bytes:
-            # Convert PCM to mulaw for Twilio
             mulaw_audio = pcm_to_mulaw(audio_bytes)
             payload = base64.b64encode(mulaw_audio).decode("utf-8")
-            
             message = {
                 "event": "media",
                 "streamSid": stream_sid,
