@@ -56,6 +56,52 @@ async def log_call_to_firestore(
     except Exception as e:
         print(f"Firestore log error: {e}")
 
+BUSINESS_USER_ID = "MmBTqzNf5OgIOIctQKPiRQezadi1"
+
+async def fetch_business_context(user_id: str) -> str:
+    """Reads business_context/{user_id} from Firestore and returns a formatted prompt string."""
+    try:
+        db = get_db()
+        doc = db.collection("business_context").document(user_id).get()
+        if not doc.exists:
+            return ""
+        data = doc.to_dict()
+        business_name = data.get("businessName", "this business")
+        business_type = data.get("businessType", "")
+        qa: dict = data.get("qaAnswers", {})
+
+        lines = [
+            f"You are the AI phone assistant for {business_name}.",
+        ]
+        if business_type:
+            lines.append(f"Business type: {business_type}")
+
+        qa_fields = [
+            ("About",                "What does your business do in one sentence?"),
+            ("Services",             "What are your main services or products?"),
+            ("Price range",          "What is your price range?"),
+            ("Walk-ins/Appointments","Do you accept walk-ins or appointments only?"),
+            ("Never say",            "What should the AI never say to customers?"),
+        ]
+        for label, question in qa_fields:
+            answer = qa.get(question, "").strip()
+            if answer:
+                lines.append(f"{label}: {answer}")
+
+        lines.append("")
+        lines.append(
+            "Always answer as if you work at this business. "
+            "Keep responses short, under 2 sentences. "
+            "IMPORTANT: Always respond in the same language the caller is using. "
+            "If the caller speaks Kanglish, Hinglish, or Tanglish, respond in the same mix. "
+            "Never ignore a language switch request."
+        )
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"fetch_business_context error: {e}")
+        return ""
+
+
 @app.get("/")
 def root():
     return {"status": "UrVoice backend running"}
@@ -75,6 +121,7 @@ async def audio_stream(websocket: WebSocket):
     audio_chunks = []
     stream_sid = None
     caller_number = None
+    business_context = ""
     speaking = False
     silence_frames = 0
     is_playing = False
@@ -92,11 +139,17 @@ async def audio_stream(websocket: WebSocket):
                 caller_number = data["start"].get("customParameters", {}).get("from") or \
                                 data["start"].get("from") or "unknown"
                 print(f"Stream started: {stream_sid}, caller: {caller_number}")
+                # Fetch business context once per call
+                business_context = await fetch_business_context(BUSINESS_USER_ID)
+                print(f"Business context loaded: {bool(business_context)}")
                 is_playing = True
-                await send_audio_response(
-                    websocket, stream_sid,
-                    "Hello! You have reached UrVoice. How can I help you today?"
-                )
+                greeting = "Hello! How can I help you today?"
+                if business_context:
+                    # Extract business name for greeting
+                    first_line = business_context.splitlines()[0]
+                    biz_name = first_line.replace("You are the AI phone assistant for ", "").rstrip(".")
+                    greeting = f"Hello! Thank you for calling {biz_name}. How can I help you today?"
+                await send_audio_response(websocket, stream_sid, greeting)
                 is_playing = False
 
             elif data["event"] == "media":
@@ -128,7 +181,7 @@ async def audio_stream(websocket: WebSocket):
 
                         if transcript and transcript.strip():
                             conversation_history.append({"role": "user", "content": transcript})
-                            ai_response = await get_ai_response(conversation_history)
+                            ai_response = await get_ai_response(conversation_history, business_context)
                             print(f"AI response: {ai_response}")
                             if ai_response and stream_sid:
                                 conversation_history.append({"role": "assistant", "content": ai_response})
@@ -304,14 +357,21 @@ async def transcribe(audio_bytes: bytes) -> str:
         print(f"Sarvam error: {e}")
         return ""
 
-async def get_ai_response(conversation_history: list) -> str:
+async def get_ai_response(conversation_history: list, business_context: str = "") -> str:
     try:
         async with httpx.AsyncClient() as client:
+            if business_context:
+                system_content = business_context
+            else:
+                system_content = (
+                    "You are UrVoice, an AI phone assistant for Indian users. "
+                    "Keep responses short, under 2 sentences. Be helpful and professional. "
+                    "IMPORTANT: Always respond in the same language the caller is using. "
+                    "If the caller speaks Kanglish, Hinglish, or Tanglish, respond in the same mix. "
+                    "Never ignore a language switch request."
+                )
             messages = [
-                {
-                    "role": "system",
-                    "content": "You are UrVoice, an AI phone assistant for Indian users. Keep responses short, under 2 sentences. Be helpful and professional. IMPORTANT: Always respond in the same language the caller is using. If the caller speaks English, respond in English. If the caller speaks Kannada, respond in Kannada. If the caller speaks Kanglish (mixed), respond in the same mix. If the caller asks you to switch language, immediately switch and stay in that language for the rest of the conversation. Never ignore a language switch request. Users often speak Kanglish, Hinglish, or Tanglish — understand and respond in the same language mix. Only say you didn't understand if the message is pure random noise with no recognizable words at all."
-                }
+                {"role": "system", "content": system_content}
             ] + conversation_history
 
             response = await client.post(
