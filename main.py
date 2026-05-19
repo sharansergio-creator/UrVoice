@@ -107,7 +107,27 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
     except Exception as e:
         print(f"Send audio error: {e}")
 
+def detect_language(text: str) -> str:
+    for char in text:
+        code = ord(char)
+        if 0x0900 <= code <= 0x097F:
+            return "hi-IN"
+        if 0x0C80 <= code <= 0x0CFF:
+            return "kn-IN"
+        if 0x0B80 <= code <= 0x0BFF:
+            return "ta-IN"
+        if 0x0C00 <= code <= 0x0C7F:
+            return "te-IN"
+    return "en"
+
 async def text_to_speech(text: str) -> bytes:
+    language = detect_language(text)
+    if language == "en":
+        return await cartesia_tts(text)
+    else:
+        return await sarvam_tts(text, language)
+
+async def cartesia_tts(text: str) -> bytes:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -138,7 +158,42 @@ async def text_to_speech(text: str) -> bytes:
                 print(f"Cartesia error: {response.status_code} {response.text}")
                 return None
     except Exception as e:
-        print(f"TTS error: {e}")
+        print(f"Cartesia TTS error: {e}")
+        return None
+
+async def sarvam_tts(text: str, language_code: str) -> bytes:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.sarvam.ai/text-to-speech",
+                headers={
+                    "api-subscription-key": SARVAM_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "inputs": [text],
+                    "target_language_code": language_code,
+                    "speaker": "meera",
+                    "model": "bulbul:v1",
+                    "speech_sample_rate": 8000,
+                    "enable_preprocessing": True,
+                    "output_audio_codec": "wav"
+                },
+                timeout=30
+            )
+            if response.status_code == 200:
+                result = response.json()
+                audio_b64 = result["audios"][0]
+                audio_bytes = base64.b64decode(audio_b64)
+                buf = io.BytesIO(audio_bytes)
+                with wave.open(buf, 'rb') as wf:
+                    pcm_bytes = wf.readframes(wf.getnframes())
+                return pcm_bytes
+            else:
+                print(f"Sarvam TTS error: {response.status_code} {response.text}")
+                return None
+    except Exception as e:
+        print(f"Sarvam TTS error: {e}")
         return None
 
 def pcm_to_mulaw(pcm_bytes: bytes) -> bytes:
