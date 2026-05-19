@@ -6,5 +6,3 @@ httpx
 websockets
 numpy
 cartesia
-webrtcvad
-setuptools

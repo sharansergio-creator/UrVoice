@@ -38,10 +38,8 @@ async def audio_stream(websocket: WebSocket):
     stream_sid = None
     speaking = False
     silence_frames = 0
-    SILENCE_LIMIT = 25  # ~800ms of silence triggers processing
-    
-    import webrtcvad
-    vad = webrtcvad.Vad(2)  # aggressiveness 0-3
+    SILENCE_LIMIT = 25
+    RMS_THRESHOLD = 300
 
     try:
         while True:
@@ -59,18 +57,12 @@ async def audio_stream(websocket: WebSocket):
             elif data["event"] == "media":
                 raw_chunk = base64.b64decode(data["media"]["payload"])
                 audio_chunks.append(data["media"]["payload"])
-                
-                # Convert mulaw chunk to PCM for VAD
+
                 pcm_chunk = mulaw_chunk_to_pcm(raw_chunk)
-                
-                # webrtcvad needs exactly 160, 320, or 480 samples (20ms, 40ms, 60ms at 8kHz)
-                # Each Twilio chunk is 160 bytes mulaw = 160 samples = 20ms
-                try:
-                    is_speech = vad.is_speech(pcm_chunk[:320], 8000)
-                except Exception:
-                    is_speech = False
-                
-                if is_speech:
+                samples = np.frombuffer(pcm_chunk, dtype=np.int16).astype(np.float32)
+                rms = np.sqrt(np.mean(samples ** 2))
+
+                if rms > RMS_THRESHOLD:
                     speaking = True
                     silence_frames = 0
                 elif speaking:
