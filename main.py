@@ -119,6 +119,7 @@ async def get_ai_response(transcript: str) -> str:
                 },
                 timeout=30
             )
+            print(f"Groq raw response: {response.status_code} {response.text}")
             result = response.json()
             return result["choices"][0]["message"]["content"]
     except Exception as e:
