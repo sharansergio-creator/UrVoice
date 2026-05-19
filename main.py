@@ -57,9 +57,9 @@ async def audio_stream(websocket: WebSocket):
                 chunk = base64.b64decode(data["media"]["payload"])
                 audio_chunks.append(data["media"]["payload"])
                 
-                # Simple energy-based silence detection
                 samples = np.frombuffer(chunk, dtype=np.uint8).astype(np.int32)
                 energy = np.mean(np.abs(samples - 128))
+                print(f"Energy: {energy:.2f}, speaking: {speaking}, silence: {silence_count}")
                 
                 if energy > 5:
                     speaking = True
@@ -67,7 +67,6 @@ async def audio_stream(websocket: WebSocket):
                 elif speaking:
                     silence_count += 1
                     if silence_count >= SILENCE_THRESHOLD:
-                        # Caller stopped speaking — process
                         speaking = False
                         chunks_to_process = audio_chunks.copy()
                         audio_chunks.clear()
