@@ -120,16 +120,32 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
         print(f"Send audio error: {e}")
 
 def detect_language(text: str) -> str:
+    hindi = kannada = tamil = telugu = latin = 0
     for char in text:
         code = ord(char)
         if 0x0900 <= code <= 0x097F:
-            return "hi-IN"
-        if 0x0C80 <= code <= 0x0CFF:
-            return "kn-IN"
-        if 0x0B80 <= code <= 0x0BFF:
-            return "ta-IN"
-        if 0x0C00 <= code <= 0x0C7F:
-            return "te-IN"
+            hindi += 1
+        elif 0x0C80 <= code <= 0x0CFF:
+            kannada += 1
+        elif 0x0B80 <= code <= 0x0BFF:
+            tamil += 1
+        elif 0x0C00 <= code <= 0x0C7F:
+            telugu += 1
+        elif (0x0041 <= code <= 0x005A) or (0x0061 <= code <= 0x007A):
+            latin += 1
+
+    total = hindi + kannada + tamil + telugu + latin
+    if total == 0:
+        return "en-IN"
+
+    if kannada / total > 0.3:
+        return "kn-IN"
+    if hindi / total > 0.3:
+        return "hi-IN"
+    if tamil / total > 0.3:
+        return "ta-IN"
+    if telugu / total > 0.3:
+        return "te-IN"
     return "en-IN"
 
 async def text_to_speech(text: str) -> bytes:
@@ -251,7 +267,7 @@ async def get_ai_response(transcript: str) -> str:
                     "messages": [
                         {
                             "role": "system",
-                            "content":"You are UrVoice, an AI phone assistant for Indian users. Keep responses short, under 2 sentences. Be helpful and professional. Users often speak Kanglish (Kannada + English mixed), Hinglish, or Tanglish — understand and respond in the same language mix the user is using. Kannada script may contain English words written phonetically — treat this as valid speech and respond normally. Only say you didn't understand if the message is pure random noise with no recognizable words at all."
+                            "content": "You are UrVoice, an AI phone assistant for Indian users. Keep responses short, under 2 sentences. Be helpful and professional. IMPORTANT: Always respond in the same language the caller is using. If the caller speaks English, respond in English. If the caller speaks Kannada, respond in Kannada. If the caller speaks Kanglish (mixed), respond in the same mix. If the caller asks you to switch language, immediately switch and stay in that language for the rest of the conversation. Never ignore a language switch request. Users often speak Kanglish, Hinglish, or Tanglish — understand and respond in the same language mix. Only say you didn't understand if the message is pure random noise with no recognizable words at all."
                         },
                         {
                             "role": "user",
