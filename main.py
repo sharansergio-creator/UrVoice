@@ -15,6 +15,7 @@ load_dotenv()
 app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 @app.get("/")
 def root():
@@ -50,6 +51,10 @@ async def audio_stream(websocket: WebSocket):
                     wav_bytes = mulaw_to_wav(raw_mulaw)
                     transcript = await transcribe(wav_bytes)
                     print(f"Caller said: {transcript}")
+                    
+                    if transcript:
+                        ai_response = await get_ai_response(transcript)
+                        print(f"AI response: {ai_response}")
                 break
 
     except Exception as e:
@@ -57,7 +62,6 @@ async def audio_stream(websocket: WebSocket):
 
 def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
     mulaw_array = np.frombuffer(mulaw_bytes, dtype=np.uint8)
-    # Decode mulaw to 16-bit PCM
     mulaw_array = mulaw_array.astype(np.int32)
     mulaw_array = ~mulaw_array
     sign = mulaw_array & 0x80
@@ -66,7 +70,6 @@ def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
     sample = ((mantissa << 3) + 0x84) << exponent
     sample = np.where(sign != 0, 0x84 - sample, sample - 0x84)
     pcm = sample.astype(np.int16).tobytes()
-    
     buf = io.BytesIO()
     with wave.open(buf, 'wb') as wf:
         wf.setnchannels(1)
@@ -85,9 +88,39 @@ async def transcribe(audio_bytes: bytes) -> str:
                 data={"language_code": "unknown", "model": "saarika:v2.5"},
                 timeout=30
             )
-            print(f"Sarvam response: {response.status_code} {response.text}")
             result = response.json()
             return result.get("transcript", "")
     except Exception as e:
         print(f"Sarvam error: {e}")
+        return ""
+
+async def get_ai_response(transcript: str) -> str:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "llama3-8b-8192",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are UrVoice, an AI phone assistant. Keep responses short, under 2 sentences. Be helpful and professional."
+                        },
+                        {
+                            "role": "user",
+                            "content": transcript
+                        }
+                    ],
+                    "max_tokens": 150
+                },
+                timeout=30
+            )
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Groq error: {e}")
         return ""
