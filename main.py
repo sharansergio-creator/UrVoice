@@ -36,11 +36,6 @@ async def audio_stream(websocket: WebSocket):
     await websocket.accept()
     audio_chunks = []
     stream_sid = None
-    speaking = False
-    silence_count = 0
-    SILENCE_THRESHOLD = 30
-    SPEECH_ENERGY = 68
-    SILENCE_ENERGY = 58
 
     try:
         while True:
@@ -52,40 +47,23 @@ async def audio_stream(websocket: WebSocket):
                 print(f"Stream started: {stream_sid}")
                 await send_audio_response(
                     websocket, stream_sid,
-                    "Hello! You have reached UrVoice. How can I help you today?"
+                    "Hello! You have reached UrVoice. Please speak your question, then press star to get a response."
                 )
 
             elif data["event"] == "media":
-                chunk = base64.b64decode(data["media"]["payload"])
                 audio_chunks.append(data["media"]["payload"])
 
-                samples = np.frombuffer(chunk, dtype=np.uint8).astype(np.int32)
-                energy = np.mean(np.abs(samples - 128))
-
-                if energy > SPEECH_ENERGY:
-                    speaking = True
-                    silence_count = 0
-                elif energy < SILENCE_ENERGY and speaking:
-                    silence_count += 1
-                    if silence_count >= SILENCE_THRESHOLD:
-                        speaking = False
-                        chunks_to_process = audio_chunks.copy()
-                        audio_chunks.clear()
-                        silence_count = 0
-
-                        raw_mulaw = b"".join(base64.b64decode(c) for c in chunks_to_process)
-                        wav_bytes = mulaw_to_wav(raw_mulaw)
-                        transcript = await transcribe(wav_bytes)
-                        print(f"Caller said: {transcript}")
-
-                        if transcript and transcript.strip():
-                            ai_response = await get_ai_response(transcript)
-                            print(f"AI response: {ai_response}")
-                            if ai_response and stream_sid:
-                                await send_audio_response(websocket, stream_sid, ai_response)
-
             elif data["event"] == "stop":
-                print("Stream stopped")
+                print("Stream stopped — processing audio")
+                if audio_chunks:
+                    raw_mulaw = b"".join(base64.b64decode(c) for c in audio_chunks)
+                    wav_bytes = mulaw_to_wav(raw_mulaw)
+                    transcript = await transcribe(wav_bytes)
+                    print(f"Caller said: {transcript}")
+
+                    if transcript and transcript.strip():
+                        ai_response = await get_ai_response(transcript)
+                        print(f"AI response: {ai_response}")
                 break
 
     except Exception as e:
