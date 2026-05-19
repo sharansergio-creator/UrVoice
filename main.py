@@ -39,7 +39,7 @@ async def audio_stream(websocket: WebSocket):
     speaking = False
     silence_frames = 0
     is_playing = False
-    SILENCE_LIMIT = 25
+    SILENCE_LIMIT = 15
     RMS_THRESHOLD = 300
 
     try:
@@ -228,7 +228,7 @@ async def transcribe(audio_bytes: bytes) -> str:
                 "https://api.sarvam.ai/speech-to-text",
                 headers={"api-subscription-key": SARVAM_API_KEY},
                 files={"file": ("audio.wav", audio_bytes, "audio/wav")},
-                data={"language_code": "unknown", "model": "saarika:v2.5"},
+                data={"language_code": "kn-IN", "model": "saarika:v2.5"},
                 timeout=30
             )
             result = response.json()
