@@ -39,6 +39,7 @@ async def audio_stream(websocket: WebSocket):
     speaking = False
     silence_frames = 0
     is_playing = False
+    conversation_history = []
     SILENCE_LIMIT = 15
     RMS_THRESHOLD = 400
 
@@ -85,9 +86,11 @@ async def audio_stream(websocket: WebSocket):
                         print(f"Caller said: {transcript}")
 
                         if transcript and transcript.strip():
-                            ai_response = await get_ai_response(transcript)
+                            conversation_history.append({"role": "user", "content": transcript})
+                            ai_response = await get_ai_response(conversation_history)
                             print(f"AI response: {ai_response}")
                             if ai_response and stream_sid:
+                                conversation_history.append({"role": "assistant", "content": ai_response})
                                 is_playing = True
                                 await send_audio_response(websocket, stream_sid, ai_response)
                                 is_playing = False
@@ -253,9 +256,16 @@ async def transcribe(audio_bytes: bytes) -> str:
         print(f"Sarvam error: {e}")
         return ""
 
-async def get_ai_response(transcript: str) -> str:
+async def get_ai_response(conversation_history: list) -> str:
     try:
         async with httpx.AsyncClient() as client:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are UrVoice, an AI phone assistant for Indian users. Keep responses short, under 2 sentences. Be helpful and professional. IMPORTANT: Always respond in the same language the caller is using. If the caller speaks English, respond in English. If the caller speaks Kannada, respond in Kannada. If the caller speaks Kanglish (mixed), respond in the same mix. If the caller asks you to switch language, immediately switch and stay in that language for the rest of the conversation. Never ignore a language switch request. Users often speak Kanglish, Hinglish, or Tanglish — understand and respond in the same language mix. Only say you didn't understand if the message is pure random noise with no recognizable words at all."
+                }
+            ] + conversation_history
+
             response = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={
@@ -264,16 +274,7 @@ async def get_ai_response(transcript: str) -> str:
                 },
                 json={
                     "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are UrVoice, an AI phone assistant for Indian users. Keep responses short, under 2 sentences. Be helpful and professional. IMPORTANT: Always respond in the same language the caller is using. If the caller speaks English, respond in English. If the caller speaks Kannada, respond in Kannada. If the caller speaks Kanglish (mixed), respond in the same mix. If the caller asks you to switch language, immediately switch and stay in that language for the rest of the conversation. Never ignore a language switch request. Users often speak Kanglish, Hinglish, or Tanglish — understand and respond in the same language mix. Only say you didn't understand if the message is pure random noise with no recognizable words at all."
-                        },
-                        {
-                            "role": "user",
-                            "content": transcript
-                        }
-                    ],
+                    "messages": messages,
                     "max_tokens": 150
                 },
                 timeout=30
