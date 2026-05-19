@@ -117,7 +117,7 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
             print(f"Sent audio response for: {text[:50]}")
 
             word_count = len(text.split())
-            wait_time = max(1.5, word_count * 0.4)
+            wait_time = max(1.0, word_count * 0.3)
             await asyncio.sleep(wait_time)
     except Exception as e:
         print(f"Send audio error: {e}")
@@ -247,7 +247,7 @@ async def transcribe(audio_bytes: bytes) -> str:
                 "https://api.sarvam.ai/speech-to-text",
                 headers={"api-subscription-key": SARVAM_API_KEY},
                 files={"file": ("audio.wav", audio_bytes, "audio/wav")},
-                data={"language_code": "kn-IN", "model": "saarika:v2.5"},
+                data={"language_code": "unknown", "model": "saarika:v2.5"},
                 timeout=30
             )
             result = response.json()
