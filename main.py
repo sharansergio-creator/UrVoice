@@ -16,6 +16,7 @@ app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
 
 @app.get("/")
 def root():
@@ -25,8 +26,6 @@ def root():
 async def incoming_call(request: Request):
     host = request.headers.get("host")
     response = VoiceResponse()
-    response.say("Hello, you have reached UrVoice. Please speak after the beep.", voice="alice")
-    response.pause(length=1)
     connect = Connect()
     connect.stream(url=f"wss://{host}/audio-stream")
     response.append(connect)
@@ -36,29 +35,126 @@ async def incoming_call(request: Request):
 async def audio_stream(websocket: WebSocket):
     await websocket.accept()
     audio_chunks = []
+    stream_sid = None
+    speaking = False
+    silence_count = 0
+    SILENCE_THRESHOLD = 20
 
     try:
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
 
-            if data["event"] == "media":
+            if data["event"] == "start":
+                stream_sid = data["start"]["streamSid"]
+                print(f"Stream started: {stream_sid}")
+                await send_audio_response(
+                    websocket, stream_sid,
+                    "Hello! You have reached UrVoice. How can I help you today?"
+                )
+
+            elif data["event"] == "media":
+                chunk = base64.b64decode(data["media"]["payload"])
                 audio_chunks.append(data["media"]["payload"])
+                
+                # Simple energy-based silence detection
+                samples = np.frombuffer(chunk, dtype=np.uint8).astype(np.int32)
+                energy = np.mean(np.abs(samples - 128))
+                
+                if energy > 5:
+                    speaking = True
+                    silence_count = 0
+                elif speaking:
+                    silence_count += 1
+                    if silence_count >= SILENCE_THRESHOLD:
+                        # Caller stopped speaking — process
+                        speaking = False
+                        chunks_to_process = audio_chunks.copy()
+                        audio_chunks.clear()
+                        silence_count = 0
+                        
+                        raw_mulaw = b"".join(base64.b64decode(c) for c in chunks_to_process)
+                        wav_bytes = mulaw_to_wav(raw_mulaw)
+                        transcript = await transcribe(wav_bytes)
+                        print(f"Caller said: {transcript}")
+                        
+                        if transcript and transcript.strip():
+                            ai_response = await get_ai_response(transcript)
+                            print(f"AI response: {ai_response}")
+                            if ai_response and stream_sid:
+                                await send_audio_response(websocket, stream_sid, ai_response)
 
             elif data["event"] == "stop":
-                if audio_chunks:
-                    raw_mulaw = b"".join(base64.b64decode(chunk) for chunk in audio_chunks)
-                    wav_bytes = mulaw_to_wav(raw_mulaw)
-                    transcript = await transcribe(wav_bytes)
-                    print(f"Caller said: {transcript}")
-                    
-                    if transcript:
-                        ai_response = await get_ai_response(transcript)
-                        print(f"AI response: {ai_response}")
+                print("Stream stopped")
                 break
 
     except Exception as e:
         print(f"WebSocket error: {e}")
+
+async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
+    try:
+        audio_bytes = await text_to_speech(text)
+        if audio_bytes:
+            # Convert PCM to mulaw for Twilio
+            mulaw_audio = pcm_to_mulaw(audio_bytes)
+            payload = base64.b64encode(mulaw_audio).decode("utf-8")
+            
+            message = {
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {"payload": payload}
+            }
+            await websocket.send_text(json.dumps(message))
+            print(f"Sent audio response for: {text[:50]}")
+    except Exception as e:
+        print(f"Send audio error: {e}")
+
+async def text_to_speech(text: str) -> bytes:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.cartesia.ai/tts/bytes",
+                headers={
+                    "Cartesia-Version": "2024-06-10",
+                    "X-API-Key": CARTESIA_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "transcript": text,
+                    "model_id": "sonic-english",
+                    "voice": {
+                        "mode": "id",
+                        "id": "a0e99841-438c-4a64-b679-ae501e7d6091"
+                    },
+                    "output_format": {
+                        "container": "raw",
+                        "encoding": "pcm_s16le",
+                        "sample_rate": 8000
+                    }
+                },
+                timeout=30
+            )
+            if response.status_code == 200:
+                return response.content
+            else:
+                print(f"Cartesia error: {response.status_code} {response.text}")
+                return None
+    except Exception as e:
+        print(f"TTS error: {e}")
+        return None
+
+def pcm_to_mulaw(pcm_bytes: bytes) -> bytes:
+    samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
+    samples = np.clip(samples, -32768, 32767)
+    sign = np.where(samples < 0, 0x80, 0x00)
+    samples = np.abs(samples)
+    samples = samples + 132
+    samples = np.clip(samples, 0, 32767)
+    exp = np.floor(np.log2(samples + 1)).astype(np.int32)
+    exp = np.clip(exp, 0, 7)
+    mantissa = ((samples >> (exp + 3)) & 0x0F).astype(np.int32)
+    mulaw = ~(sign | (exp << 4) | mantissa)
+    return (mulaw & 0xFF).astype(np.uint8).tobytes()
 
 def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
     mulaw_array = np.frombuffer(mulaw_bytes, dtype=np.uint8)
@@ -119,7 +215,6 @@ async def get_ai_response(transcript: str) -> str:
                 },
                 timeout=30
             )
-            print(f"Groq raw response: {response.status_code} {response.text}")
             result = response.json()
             return result["choices"][0]["message"]["content"]
     except Exception as e:
