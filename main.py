@@ -98,7 +98,7 @@ async def audio_stream(websocket: WebSocket):
 
     except Exception as e:
         print(f"WebSocket error: {e}")
-        
+
 async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
     try:
         audio_bytes = await text_to_speech(text)
@@ -150,7 +150,7 @@ async def cartesia_tts(text: str) -> bytes:
                     "model_id": "sonic-english",
                     "voice": {
                         "mode": "id",
-                        "id": "a0e99841-438c-4a64-b679-ae501e7d6091"
+                        "id": "79a125e8-cd45-4c13-8a67-188112f4dd22"
                     },
                     "output_format": {
                         "container": "raw",
@@ -207,28 +207,20 @@ async def sarvam_tts(text: str, language_code: str) -> bytes:
 def pcm_to_mulaw(pcm_bytes: bytes) -> bytes:
     MULAW_MAX = 0x1FFF
     MULAW_BIAS = 33
-    
+
     samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
-    
-    # Get sign and magnitude
     sign = np.where(samples < 0, 0x80, 0x00)
     samples = np.abs(samples)
-    
-    # Clamp and add bias
     samples = np.clip(samples, 0, 32767)
     samples = samples + MULAW_BIAS
     samples = np.clip(samples, 0, MULAW_MAX)
-    
-    # Find exponent
+
     exp = np.zeros(len(samples), dtype=np.int32)
     for i in range(7, -1, -1):
         mask = samples >= (1 << (i + 5))
         exp = np.where(mask & (exp == 0), i, exp)
-    
-    # Get mantissa
+
     mantissa = (samples >> (exp + 1)) & 0x0F
-    
-    # Combine and invert
     mulaw = ~(sign | (exp << 4) | mantissa)
     return (mulaw & 0xFF).astype(np.uint8).tobytes()
 
@@ -291,7 +283,7 @@ async def get_ai_response(transcript: str) -> str:
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are UrVoice, an AI phone assistant. Keep responses short, under 2 sentences. Be helpful and professional."
+                            "content": "You are UrVoice, an AI phone assistant. Keep responses short, under 2 sentences. Be helpful and professional. If you cannot understand what the caller said or it seems garbled or unclear, respond with: 'Sorry, I didn't catch that clearly. Could you please repeat?' Do not guess unclear words."
                         },
                         {
                             "role": "user",
