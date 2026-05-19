@@ -36,6 +36,12 @@ async def audio_stream(websocket: WebSocket):
     await websocket.accept()
     audio_chunks = []
     stream_sid = None
+    speaking = False
+    silence_frames = 0
+    SILENCE_LIMIT = 25  # ~800ms of silence triggers processing
+    
+    import webrtcvad
+    vad = webrtcvad.Vad(2)  # aggressiveness 0-3
 
     try:
         while True:
@@ -47,23 +53,47 @@ async def audio_stream(websocket: WebSocket):
                 print(f"Stream started: {stream_sid}")
                 await send_audio_response(
                     websocket, stream_sid,
-                    "Hello! You have reached UrVoice. Please speak your question, then press star to get a response."
+                    "Hello! You have reached UrVoice. How can I help you today?"
                 )
 
             elif data["event"] == "media":
+                raw_chunk = base64.b64decode(data["media"]["payload"])
                 audio_chunks.append(data["media"]["payload"])
+                
+                # Convert mulaw chunk to PCM for VAD
+                pcm_chunk = mulaw_chunk_to_pcm(raw_chunk)
+                
+                # webrtcvad needs exactly 160, 320, or 480 samples (20ms, 40ms, 60ms at 8kHz)
+                # Each Twilio chunk is 160 bytes mulaw = 160 samples = 20ms
+                try:
+                    is_speech = vad.is_speech(pcm_chunk[:320], 8000)
+                except Exception:
+                    is_speech = False
+                
+                if is_speech:
+                    speaking = True
+                    silence_frames = 0
+                elif speaking:
+                    silence_frames += 1
+                    if silence_frames >= SILENCE_LIMIT:
+                        speaking = False
+                        silence_frames = 0
+                        chunks_to_process = audio_chunks.copy()
+                        audio_chunks.clear()
+
+                        raw_mulaw = b"".join(base64.b64decode(c) for c in chunks_to_process)
+                        wav_bytes = mulaw_to_wav(raw_mulaw)
+                        transcript = await transcribe(wav_bytes)
+                        print(f"Caller said: {transcript}")
+
+                        if transcript and transcript.strip():
+                            ai_response = await get_ai_response(transcript)
+                            print(f"AI response: {ai_response}")
+                            if ai_response and stream_sid:
+                                await send_audio_response(websocket, stream_sid, ai_response)
 
             elif data["event"] == "stop":
-                print("Stream stopped — processing audio")
-                if audio_chunks:
-                    raw_mulaw = b"".join(base64.b64decode(c) for c in audio_chunks)
-                    wav_bytes = mulaw_to_wav(raw_mulaw)
-                    transcript = await transcribe(wav_bytes)
-                    print(f"Caller said: {transcript}")
-
-                    if transcript and transcript.strip():
-                        ai_response = await get_ai_response(transcript)
-                        print(f"AI response: {ai_response}")
+                print("Stream stopped")
                 break
 
     except Exception as e:
@@ -149,6 +179,17 @@ def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
         wf.setframerate(8000)
         wf.writeframes(pcm)
     return buf.getvalue()
+
+def mulaw_chunk_to_pcm(mulaw_bytes: bytes) -> bytes:
+    mulaw_array = np.frombuffer(mulaw_bytes, dtype=np.uint8)
+    mulaw_array = mulaw_array.astype(np.int32)
+    mulaw_array = ~mulaw_array
+    sign = mulaw_array & 0x80
+    exponent = (mulaw_array >> 4) & 0x07
+    mantissa = mulaw_array & 0x0F
+    sample = ((mantissa << 3) + 0x84) << exponent
+    sample = np.where(sign != 0, 0x84 - sample, sample - 0x84)
+    return sample.astype(np.int16).tobytes()
 
 async def transcribe(audio_bytes: bytes) -> str:
     try:
