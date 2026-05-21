@@ -13,7 +13,8 @@ import numpy as np
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore import SERVER_TIMESTAMP
+from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion
+from datetime import datetime
 
 load_dotenv()
 
@@ -31,30 +32,12 @@ if _firebase_creds_json and not firebase_admin._apps:
 def get_db():
     return firestore.client()
 
-async def log_call_to_firestore(
-    caller_number: str,
-    transcript: str,
-    ai_response: str,
-    language: str,
-):
-    """Persist a completed call exchange to Firestore call_logs collection."""
+async def append_exchange_to_session(doc_ref, exchange: dict):
+    """Append one exchange dict to the session document's exchanges array."""
     try:
-        db = get_db()
-        doc = {
-            "callId": str(uuid.uuid4()),
-            "userId": BUSINESS_USER_ID,
-            "callerNumber": caller_number or "unknown",
-            "transcript": transcript,
-            "aiResponse": ai_response,
-            "language": language,
-            "timestamp": SERVER_TIMESTAMP,
-            "category": "CUSTOMER",
-            "duration": 0,
-        }
-        db.collection("call_logs").add(doc)
-        print(f"Call log saved for {caller_number}")
+        doc_ref.update({"exchanges": ArrayUnion([exchange])})
     except Exception as e:
-        print(f"Firestore log error: {e}")
+        print(f"Session exchange append error: {e}")
 
 BUSINESS_USER_ID = "MmBTqzNf5OgIOIctQKPiRQezadi1"
 
@@ -126,6 +109,9 @@ async def audio_stream(websocket: WebSocket):
     silence_frames = 0
     is_playing = False
     conversation_history = []
+    session_id = None
+    session_doc_ref = None
+    exchanges = []
     SILENCE_LIMIT = 15
     RMS_THRESHOLD = 400
 
@@ -142,6 +128,19 @@ async def audio_stream(websocket: WebSocket):
                 # Fetch business context once per call
                 business_context = await fetch_business_context(BUSINESS_USER_ID)
                 print(f"Business context loaded: {bool(business_context)}")
+                # Create a session document in Firestore
+                session_id = str(uuid.uuid4())
+                db = get_db()
+                session_doc_ref = db.collection("call_sessions").document(session_id)
+                session_doc_ref.set({
+                    "sessionId": session_id,
+                    "userId": BUSINESS_USER_ID,
+                    "callerNumber": caller_number or "unknown",
+                    "startTime": SERVER_TIMESTAMP,
+                    "status": "active",
+                    "exchanges": [],
+                })
+                print(f"Session created: {session_id}")
                 is_playing = True
                 greeting = "Hello! How can I help you today?"
                 if business_context:
@@ -189,15 +188,30 @@ async def audio_stream(websocket: WebSocket):
                                 await send_audio_response(websocket, stream_sid, ai_response)
                                 is_playing = False
                                 detected_lang = detect_language(transcript)
-                                asyncio.create_task(log_call_to_firestore(
-                                    caller_number=caller_number,
-                                    transcript=transcript,
-                                    ai_response=ai_response,
-                                    language=detected_lang,
-                                ))
+                                exchange = {
+                                    "transcript": transcript,
+                                    "aiResponse": ai_response,
+                                    "language": detected_lang,
+                                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                                }
+                                exchanges.append(exchange)
+                                if session_doc_ref:
+                                    asyncio.create_task(
+                                        append_exchange_to_session(session_doc_ref, exchange)
+                                    )
 
             elif data["event"] == "stop":
                 print("Stream stopped")
+                if session_doc_ref:
+                    try:
+                        session_doc_ref.update({
+                            "status": "completed",
+                            "endTime": SERVER_TIMESTAMP,
+                            "totalExchanges": len(exchanges),
+                        })
+                        print(f"Session {session_id} completed with {len(exchanges)} exchange(s)")
+                    except Exception as e:
+                        print(f"Session close error: {e}")
                 break
 
     except Exception as e:
