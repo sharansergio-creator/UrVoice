@@ -42,7 +42,7 @@ async def log_call_to_firestore(
         db = get_db()
         doc = {
             "callId": str(uuid.uuid4()),
-            "userId": "test_user",
+            "userId": BUSINESS_USER_ID,
             "callerNumber": caller_number or "unknown",
             "transcript": transcript,
             "aiResponse": ai_response,
