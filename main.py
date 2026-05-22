@@ -222,6 +222,7 @@ async def _scrape_gbp(gbp_url: str) -> dict:
     """Extract structured data from a Google Business Profile share URL."""
     result = {"businessName": "", "address": "", "phone": "", "hours": "",
                "rating": "", "category": ""}
+    html = ""
     try:
         html = await _fetch_html(gbp_url)
         soup = BeautifulSoup(html, "lxml")
@@ -280,114 +281,104 @@ async def _scrape_gbp(gbp_url: str) -> dict:
         if cat_tag:
             result["category"] = cat_tag.get_text(" ", strip=True)
 
+        # Also try business name from URL if not found in HTML
+        if not result["businessName"]:
+            result["businessName"] = _name_from_gbp_url(gbp_url)
+
     except Exception as e:
         print(f"GBP scrape error: {e}")
+
+    # If address/phone still missing, use Groq on the GBP page text
+    if html and (not result["address"] or not result["phone"]):
+        try:
+            soup_text = BeautifulSoup(html, "lxml").get_text(" ", strip=True)
+            groq_data = await _groq_extract(soup_text, include_address=True)
+            if not result["address"] and groq_data.get("address"):
+                result["address"] = groq_data["address"]
+            if not result["phone"] and groq_data.get("phone"):
+                result["phone"] = groq_data["phone"]
+        except Exception as e:
+            print(f"GBP Groq fallback error: {e}")
+
     return result
 
 
-async def _groq_web_search(business_name: str, website_url: str, gbp_url: str) -> dict:
-    """Use Groq compound-beta (web search) to find missing business info online."""
-    fields = {"address": "", "phone": "", "hours": "", "about": "", "services": "", "pricing": ""}
-    if not GROQ_API_KEY:
-        return fields
-    query = business_name or website_url or gbp_url
-    if not query:
-        return fields
-    ref = website_url or gbp_url
+def _parse_llm_json(text: str) -> dict:
+    """Robustly parse JSON from LLM output that may have markdown code fences."""
+    # Strip markdown code fences
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).replace("```", "").strip()
+    # Find outermost JSON object
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def _name_from_gbp_url(url: str) -> str:
+    """Extract readable business name from a Google Maps URL path."""
+    m = re.search(r"/place/([^/@?&#]+)", url)
+    if m:
+        raw = m.group(1)
+        return raw.replace("+", " ").replace("%20", " ").replace("%2C", ",").strip()
+    return ""
+
+
+async def _groq_extract(text: str, include_address: bool = False) -> dict:
+    """Use llama-3.3-70b-versatile to extract business fields from raw text."""
+    keys = "about, services, pricing" + (", address, phone" if include_address else "")
+    extracted = {"about": "", "services": "", "pricing": "", "address": "", "phone": ""}
+    if not GROQ_API_KEY or not text.strip():
+        return extracted
+    trimmed = text[:5000]
     try:
-        async with httpx.AsyncClient(timeout=50) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": "compound-beta",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": (
-                                f'Find details for the business "{query}"'
-                                + (f" at {ref}" if ref else "") + ". "
-                                "I need: full address, phone number, business hours, "
-                                "about/description of what the business does, "
-                                "services or products offered, and pricing details. "
-                                "Return ONLY valid JSON with keys: "
-                                "address, phone, hours, about, services, pricing. "
-                                "Use empty string for fields not found. No markdown, just JSON."
-                            ),
-                        }
-                    ],
-                    "max_tokens": 700,
-                    "temperature": 0.1,
-                },
-            )
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"].strip()
-        m = re.search(r"\{.*\}", content, re.DOTALL)
-        if m:
-            parsed = json.loads(m.group(0))
-            for key in fields:
-                val = parsed.get(key, "")
-                if val:
-                    fields[key] = str(val)[:600]
-        print(f"Groq web search result keys: {[k for k, v in fields.items() if v]}")
-    except Exception as e:
-        print(f"Groq web search error: {e}")
-    return fields
-
-
-async def _extract_with_groq(full_text: str) -> dict:
-    """Use Groq LLM to extract about/services/pricing from raw website text."""
-    extracted = {"about": "", "services": "", "pricing": ""}
-    if not GROQ_API_KEY or not full_text.strip():
-        return extracted
-    trimmed = full_text[:4000]
-    try:
-        async with httpx.AsyncClient(timeout=25) as client:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
                 json={
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
                         {
                             "role": "system",
                             "content": (
-                                "You extract business info from website text. "
-                                "Return ONLY a JSON object with exactly these keys: "
-                                "\"about\" (2-3 sentences describing what the business does), "
-                                "\"services\" (comma-separated list of services or products), "
-                                "\"pricing\" (pricing details if present, else empty string). "
-                                "No extra text, no markdown, just the JSON."
+                                "You extract business information from website/page text. "
+                                f"Return ONLY a JSON object with these keys: {keys}. "
+                                "For 'about': 2-3 sentences about what the business does. "
+                                "For 'services': comma-separated list of services or products. "
+                                "For 'pricing': all price info found (packages, rates, tariffs). "
+                                "For 'address': full physical address if found. "
+                                "Use empty string for fields not found. No markdown, just JSON."
                             ),
                         },
-                        {
-                            "role": "user",
-                            "content": f"Extract business info:\n\n{trimmed}",
-                        },
+                        {"role": "user", "content": f"Extract business info:\n\n{trimmed}"},
                     ],
-                    "max_tokens": 500,
+                    "max_tokens": 600,
                     "temperature": 0.1,
                 },
             )
         data = resp.json()
         content = data["choices"][0]["message"]["content"].strip()
-        m = re.search(r"\{.*\}", content, re.DOTALL)
-        if m:
-            parsed = json.loads(m.group(0))
-            extracted["about"]    = str(parsed.get("about",    ""))[:600]
-            extracted["services"] = str(parsed.get("services", ""))[:400]
-            extracted["pricing"]  = str(parsed.get("pricing",  ""))[:200]
+        parsed = _parse_llm_json(content)
+        for key in extracted:
+            if parsed.get(key):
+                extracted[key] = str(parsed[key])[:600]
+        print(f"Groq extract keys found: {[k for k, v in extracted.items() if v]}")
     except Exception as e:
-        print(f"Groq extraction error: {e}")
+        print(f"Groq extract error: {e}")
     return extracted
 
 
+# Keep alias for compatibility
+_extract_with_groq = _groq_extract
+
+
 async def _scrape_website(website_url: str) -> dict:
-    """Extract about/services/pricing/contact/FAQ text from a website."""
-    result = {"about": "", "services": "", "pricing": "", "contact": "", "faqs": ""}
+    """Extract about/services/pricing/address/contact/FAQ text from a website."""
+    result = {"about": "", "services": "", "pricing": "", "address": "", "contact": "", "faqs": ""}
     pages_html: list[str] = []
 
     # Fetch homepage
@@ -398,9 +389,12 @@ async def _scrape_website(website_url: str) -> dict:
         print(f"Website homepage fetch error: {e}")
         return result
 
-    # Try common sub-pages
+    # Try common sub-pages (including contact and pricing pages for address/rates)
     base = website_url.rstrip("/")
-    for slug in ("/about", "/about-us", "/services", "/our-services", "/faq", "/faqs"):
+    for slug in ("/about", "/about-us", "/services", "/our-services",
+                 "/contact", "/contact-us", "/reach-us",
+                 "/packages", "/pricing", "/rates", "/tariff", "/rooms",
+                 "/faq", "/faqs"):
         try:
             html = await _fetch_html(f"{base}{slug}")
             pages_html.append(html)
@@ -468,15 +462,12 @@ async def _scrape_website(website_url: str) -> dict:
     if faq_items:
         result["faqs"] = "; ".join(faq_items[:10])
 
-    # If heuristics couldn't extract about/services/pricing, use Groq LLM
-    if not result["about"] or not result["services"]:
-        groq_data = await _extract_with_groq(full_text)
-        if not result["about"] and groq_data["about"]:
-            result["about"] = groq_data["about"]
-        if not result["services"] and groq_data["services"]:
-            result["services"] = groq_data["services"]
-        if not result["pricing"] and groq_data["pricing"]:
-            result["pricing"] = groq_data["pricing"]
+    # Use Groq to extract all remaining fields (about, services, pricing, address)
+    if not result["about"] or not result["services"] or not result["pricing"] or not result["address"]:
+        groq_data = await _groq_extract(full_text, include_address=True)
+        for field in ("about", "services", "pricing", "address"):
+            if not result[field] and groq_data.get(field):
+                result[field] = groq_data[field]
 
     return result
 
@@ -505,7 +496,7 @@ async def fetch_business_context_endpoint(body: FetchBusinessContextRequest):
 
     result = {
         "businessName":  gbp_data.get("businessName") or "",
-        "address":       gbp_data.get("address") or "",
+        "address":       gbp_data.get("address") or web_data.get("address") or "",
         "phone":         gbp_data.get("phone") or web_data.get("contact") or "",
         "hours":         gbp_data.get("hours") or "",
         "rating":        gbp_data.get("rating") or "",
@@ -525,18 +516,6 @@ async def fetch_business_context_endpoint(body: FetchBusinessContextRequest):
         "events":        "",
         "fetched":       True,
     }
-
-    # If key fields are still missing, use Groq web search to find them online
-    missing = not result["address"] or not result["about"] or not result["services"] or not result["pricing"]
-    if missing:
-        search_result = await _groq_web_search(
-            result.get("businessName", ""),
-            body.website_url,
-            body.gbp_url,
-        )
-        for field in ("address", "phone", "hours", "about", "services", "pricing"):
-            if not result.get(field) and search_result.get(field):
-                result[field] = search_result[field]
 
     # Persist to Firestore — skip empty strings so existing data is never overwritten
     try:
