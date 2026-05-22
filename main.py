@@ -199,32 +199,74 @@ async def _fetch_html(url: str, follow_redirects: bool = True) -> str:
 
 
 async def _jina_read(url: str) -> str:
-    """Convert any URL to clean LLM-readable text via Jina Reader (no API key needed).
-    Handles JS-rendered pages, Google Maps, and regular websites."""
+    """Convert any URL to clean LLM-readable text via Jina Reader.
+    Falls back to direct httpx + BeautifulSoup if Jina fails/times out."""
+    # Try Jina first (best for JS-rendered pages)
     try:
         async with httpx.AsyncClient(
             headers={"User-Agent": _BROWSER_HEADERS["User-Agent"], "X-Return-Format": "text"},
             follow_redirects=True,
-            timeout=25,
+            timeout=20,
         ) as client:
             resp = await client.get(f"https://r.jina.ai/{url}")
-            if resp.status_code == 200:
+            if resp.status_code == 200 and len(resp.text.strip()) > 150:
                 return resp.text[:8000]
-            print(f"Jina returned {resp.status_code} for {url}")
+            print(f"Jina returned {resp.status_code} / short response for {url}")
     except Exception as e:
         print(f"Jina read error for {url}: {e}")
+
+    # Fallback: direct httpx + BeautifulSoup
+    try:
+        async with httpx.AsyncClient(
+            headers=_BROWSER_HEADERS, follow_redirects=True, timeout=12
+        ) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "lxml")
+                for tag in soup.select("nav, header, footer, script, style, noscript"):
+                    tag.decompose()
+                text = soup.get_text(" ", strip=True)
+                # Collapse whitespace
+                text = re.sub(r"\s{3,}", "  ", text)
+                return text[:8000]
+    except Exception as e:
+        print(f"Direct fetch error for {url}: {e}")
     return ""
 
 
 async def _scrape_gbp(gbp_url: str) -> dict:
-    """Extract business info from a Google Business Profile URL via Jina Reader + Groq."""
+    """Extract business info from a Google Business Profile URL.
+    Jina blocks google.com so we extract the name from the URL and then
+    try a direct HTML fetch for any meta-data."""
     result = {"businessName": "", "address": "", "phone": "", "hours": "",
               "rating": "", "category": ""}
 
-    text = await _jina_read(gbp_url)
+    # Extract business name from URL path (works for all GBP URL formats)
+    result["businessName"] = _name_from_gbp_url(gbp_url)
+
+    # Try direct HTML fetch — Google embeds some OGP/meta tags even without JS
+    text = ""
+    try:
+        async with httpx.AsyncClient(
+            headers=_BROWSER_HEADERS, follow_redirects=True, timeout=12
+        ) as client:
+            resp = await client.get(gbp_url)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "lxml")
+                # Try meta description and og:description
+                for attr in ("og:description", "description"):
+                    meta = soup.find("meta", attrs={"property": attr}) or \
+                           soup.find("meta", attrs={"name": attr})
+                    if meta and meta.get("content"):
+                        text += meta["content"] + " "
+                # Try page title
+                if soup.title and soup.title.string:
+                    text += soup.title.string + " "
+    except Exception as e:
+        print(f"GBP direct fetch error: {e}")
+
     if not text.strip():
-        result["businessName"] = _name_from_gbp_url(gbp_url)
-        return result
+        return result  # return with name only
 
     if GROQ_API_KEY:
         try:
@@ -339,18 +381,15 @@ _extract_with_groq = _groq_extract
 
 
 async def _scrape_website(website_url: str) -> dict:
-    """Extract business info from a website via Jina Reader + Groq."""
+    """Extract business info from a website via Jina Reader (+ httpx fallback) + Groq."""
     result = {"about": "", "services": "", "pricing": "", "address": "", "contact": "", "faqs": ""}
 
     base = website_url.rstrip("/")
-    # Fetch homepage + key sub-pages concurrently via Jina Reader
+    # Fetch 3 most valuable pages concurrently (homepage always, plus contact + about)
     pages_to_fetch = [
         website_url,
         f"{base}/contact",
-        f"{base}/contact-us",
         f"{base}/about",
-        f"{base}/services",
-        f"{base}/packages",
     ]
 
     raw_texts = await asyncio.gather(*[_jina_read(u) for u in pages_to_fetch], return_exceptions=True)
@@ -360,16 +399,16 @@ async def _scrape_website(website_url: str) -> dict:
         print(f"Website scrape: no content retrieved for {website_url}")
         return result
 
-    combined = "\n\n---PAGE---\n\n".join(pages)[:7000]
+    combined = "\n\n---\n\n".join(pages)[:8000]
 
-    # Single Groq call to extract all fields from the clean combined text
+    # Single Groq call to extract all fields
     groq_data = await _groq_extract(combined, include_address=True)
     result["about"]    = groq_data.get("about", "")
     result["services"] = groq_data.get("services", "")
     result["pricing"]  = groq_data.get("pricing", "")
     result["address"]  = groq_data.get("address", "")
 
-    # Extract contact details via regex (reliable in clean text)
+    # Regex for phone/email (reliable in clean text)
     phones = re.findall(r"(\+?\d[\d\s\-().]{7,}\d)", combined)
     emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", combined)
     parts = []
