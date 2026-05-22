@@ -164,9 +164,6 @@ Rules:
 - Never ignore a language switch request from the caller""")
 
     return "\n".join(sections)
-    except Exception as e:
-        print(f"fetch_business_context error: {e}")
-        return ""
 
 
 # ---------------------------------------------------------------------------
