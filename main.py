@@ -14,7 +14,7 @@ import re
 import numpy as np
 from dotenv import load_dotenv
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion, Increment
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -43,6 +43,29 @@ async def append_exchange_to_session(doc_ref, exchange: dict):
         print(f"Session exchange append error: {e}")
 
 BUSINESS_USER_ID = "MmBTqzNf5OgIOIctQKPiRQezadi1"
+
+async def send_fcm_notification(user_id: str, title: str, body: str, data: dict):
+    try:
+        db = get_db()
+        user_doc = db.collection("users").document(user_id).get()
+        if not user_doc.exists:
+            print(f"No user doc found for {user_id}")
+            return
+        fcm_token = user_doc.to_dict().get("fcmToken")
+        if not fcm_token:
+            print(f"No FCM token for user {user_id}")
+            return
+        message = messaging.Message(
+            notification=messaging.Notification(title=title, body=body),
+            data={k: str(v) for k, v in data.items()},
+            token=fcm_token,
+            android=messaging.AndroidConfig(priority="high")
+        )
+        response = messaging.send(message)
+        print(f"FCM notification sent: {response}")
+    except Exception as e:
+        print(f"FCM error: {e}")
+
 
 async def fetch_business_context(user_id: str) -> str:
     try:
@@ -661,6 +684,13 @@ async def audio_stream(websocket: WebSocket):
                 })
                 print(f"Session created: {session_id}")
 
+                asyncio.create_task(send_fcm_notification(
+                    BUSINESS_USER_ID,
+                    "📞 Incoming Call",
+                    f"{caller_name or 'Unknown Caller'} is calling",
+                    {"sessionId": session_id, "callerName": caller_name or "", "type": "CALL_STARTED"}
+                ))
+
                 is_playing = True
                 await send_audio_response(websocket, stream_sid, greeting)
                 is_playing = False
@@ -807,6 +837,12 @@ async def audio_stream(websocket: WebSocket):
                     "totalExchanges": len(exchanges)
                 })
                 print(f"Session {session_id} completed with {len(exchanges)} exchanges")
+                asyncio.create_task(send_fcm_notification(
+                    BUSINESS_USER_ID,
+                    "📋 Call Completed",
+                    f"Call ended - {len(exchanges)} exchanges",
+                    {"sessionId": session_id, "type": "CALL_ENDED"}
+                ))
             except Exception as fe:
                 print(f"Session finalize error: {fe}")
 
