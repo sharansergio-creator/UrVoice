@@ -416,13 +416,15 @@ async def fetch_business_context_endpoint(body: FetchBusinessContextRequest):
         "fetched":       True,
     }
 
-    # Persist to Firestore
+    # Persist to Firestore — skip empty strings so existing data is never overwritten
     try:
         db = get_db()
+        to_save = {k: v for k, v in result.items() if v != "" and v is not None}
+        to_save["fetched"] = True  # always mark as fetched
         db.collection("business_context").document(body.user_id).set(
-            result, merge=True
+            to_save, merge=True
         )
-        print(f"Saved business context for user {body.user_id}")
+        print(f"Saved business context for user {body.user_id}: {list(to_save.keys())}")
     except Exception as e:
         print(f"Firestore save error: {e}")
 
