@@ -285,6 +285,56 @@ async def _scrape_gbp(gbp_url: str) -> dict:
     return result
 
 
+async def _groq_web_search(business_name: str, website_url: str, gbp_url: str) -> dict:
+    """Use Groq compound-beta (web search) to find missing business info online."""
+    fields = {"address": "", "phone": "", "hours": "", "about": "", "services": "", "pricing": ""}
+    if not GROQ_API_KEY:
+        return fields
+    query = business_name or website_url or gbp_url
+    if not query:
+        return fields
+    ref = website_url or gbp_url
+    try:
+        async with httpx.AsyncClient(timeout=50) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "compound-beta",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                f'Find details for the business "{query}"'
+                                + (f" at {ref}" if ref else "") + ". "
+                                "I need: full address, phone number, business hours, "
+                                "about/description of what the business does, "
+                                "services or products offered, and pricing details. "
+                                "Return ONLY valid JSON with keys: "
+                                "address, phone, hours, about, services, pricing. "
+                                "Use empty string for fields not found. No markdown, just JSON."
+                            ),
+                        }
+                    ],
+                    "max_tokens": 700,
+                    "temperature": 0.1,
+                },
+            )
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        m = re.search(r"\{.*\}", content, re.DOTALL)
+        if m:
+            parsed = json.loads(m.group(0))
+            for key in fields:
+                val = parsed.get(key, "")
+                if val:
+                    fields[key] = str(val)[:600]
+        print(f"Groq web search result keys: {[k for k, v in fields.items() if v]}")
+    except Exception as e:
+        print(f"Groq web search error: {e}")
+    return fields
+
+
 async def _extract_with_groq(full_text: str) -> dict:
     """Use Groq LLM to extract about/services/pricing from raw website text."""
     extracted = {"about": "", "services": "", "pricing": ""}
@@ -475,6 +525,18 @@ async def fetch_business_context_endpoint(body: FetchBusinessContextRequest):
         "events":        "",
         "fetched":       True,
     }
+
+    # If key fields are still missing, use Groq web search to find them online
+    missing = not result["address"] or not result["about"] or not result["services"] or not result["pricing"]
+    if missing:
+        search_result = await _groq_web_search(
+            result.get("businessName", ""),
+            body.website_url,
+            body.gbp_url,
+        )
+        for field in ("address", "phone", "hours", "about", "services", "pricing"):
+            if not result.get(field) and search_result.get(field):
+                result[field] = search_result[field]
 
     # Persist to Firestore — skip empty strings so existing data is never overwritten
     try:
