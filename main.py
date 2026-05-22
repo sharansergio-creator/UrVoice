@@ -45,44 +45,125 @@ async def append_exchange_to_session(doc_ref, exchange: dict):
 BUSINESS_USER_ID = "MmBTqzNf5OgIOIctQKPiRQezadi1"
 
 async def fetch_business_context(user_id: str) -> str:
-    """Reads business_context/{user_id} from Firestore and returns a formatted prompt string."""
     try:
         db = get_db()
         doc = db.collection("business_context").document(user_id).get()
         if not doc.exists:
             return ""
         data = doc.to_dict()
-        business_name = data.get("businessName", "this business")
-        business_type = data.get("businessType", "")
-        qa: dict = data.get("qaAnswers", {})
+        return build_system_prompt(data)
+    except Exception as e:
+        print(f"fetch_business_context error: {e}")
+        return ""
 
-        lines = [
-            f"You are the AI phone assistant for {business_name}.",
-        ]
-        if business_type:
-            lines.append(f"Business type: {business_type}")
 
-        qa_fields = [
-            ("About",                "What does your business do in one sentence?"),
-            ("Services",             "What are your main services or products?"),
-            ("Price range",          "What is your price range?"),
-            ("Walk-ins/Appointments","Do you accept walk-ins or appointments only?"),
-            ("Never say",            "What should the AI never say to customers?"),
-        ]
-        for label, question in qa_fields:
-            answer = qa.get(question, "").strip()
-            if answer:
-                lines.append(f"{label}: {answer}")
+def build_system_prompt(data: dict) -> str:
+    sections = []
 
-        lines.append("")
-        lines.append(
-            "Always answer as if you work at this business. "
-            "Keep responses short, under 2 sentences. "
-            "IMPORTANT: Always respond in the same language the caller is using. "
-            "If the caller speaks Kanglish, Hinglish, or Tanglish, respond in the same mix. "
-            "Never ignore a language switch request."
-        )
-        return "\n".join(lines)
+    # Identity
+    name = data.get("businessName", "this business")
+    btype = data.get("businessType", "business")
+    location = data.get("location", "")
+    sections.append(
+        f"You are the AI phone assistant for {name}, a {btype}"
+        + (f", located in {location}" if location else "") + "."
+    )
+
+    # Contact
+    phone = data.get("phone", "")
+    email = data.get("email", "")
+    if phone or email:
+        contact = f"Contact: {phone}"
+        if email:
+            contact += f", {email}"
+        sections.append(contact)
+
+    # About
+    about = data.get("about", "")
+    if about:
+        sections.append(f"About: {about}")
+
+    # Services
+    services = data.get("services", "")
+    if services:
+        sections.append(f"Services: {services}")
+
+    # Accommodations (for resorts/hotels)
+    accommodations = data.get("accommodations", "")
+    if accommodations:
+        sections.append(f"Accommodation options: {accommodations}")
+
+    # Activities (for resorts)
+    activities = data.get("activities", "")
+    if activities:
+        sections.append(f"Activities: {activities}")
+
+    # Paid activities
+    paid_activities = data.get("paidActivities", "")
+    if paid_activities:
+        sections.append(f"Extra paid activities: {paid_activities}")
+
+    # Pricing
+    pricing = data.get("pricing", "")
+    if pricing:
+        sections.append(f"Pricing: {pricing}")
+
+    # Hours
+    hours = data.get("hours", "")
+    if hours:
+        sections.append(f"Business hours: {hours}")
+
+    # Events
+    events = data.get("events", "")
+    if events:
+        sections.append(f"Events hosted: {events}")
+
+    # Social media
+    instagram = data.get("instagram", "")
+    if instagram:
+        sections.append(f"Instagram: {instagram}")
+
+    facebook = data.get("facebook", "")
+    if facebook:
+        sections.append(f"Facebook: {facebook}")
+
+    # OTA platforms
+    ota = data.get("otaPlatforms", "")
+    if ota:
+        sections.append(f"Listed on: {ota}")
+
+    # QA answers from BusinessSetup screen
+    qa = data.get("qaAnswers", {})
+    qa_fields = [
+        ("What does your business do in one sentence?", "About"),
+        ("What are your main services or products?", "Services"),
+        ("What is your price range?", "Price range"),
+        ("Do you accept walk-ins or appointments only?", "Bookings"),
+        ("What should the AI never say to customers?", "Never say"),
+    ]
+    existing = "\n".join(sections)
+    for question, label in qa_fields:
+        answer = qa.get(question, "").strip()
+        if answer and label not in existing:
+            sections.append(f"{label}: {answer}")
+
+    # Website
+    website = data.get("websiteUrl", "")
+    if website:
+        sections.append(f"Website: {website}")
+
+    # Universal rules
+    sections.append("""
+Rules:
+- Always respond as a helpful, friendly staff member of this business
+- Keep responses short, under 2 sentences
+- Always respond in the same language the caller uses
+- Never make up pricing or availability — say you will check and confirm
+- For bookings, always ask for date, number of people, and preference
+- If you don't know something, say you will check and call back
+- Never ignore a language switch request from the caller""")
+
+    return "\n".join(sections)
     except Exception as e:
         print(f"fetch_business_context error: {e}")
         return ""
@@ -316,18 +397,26 @@ async def fetch_business_context_endpoint(body: FetchBusinessContextRequest):
             print(f"{key} scrape task error: {e}")
 
     result = {
-        "businessName": gbp_data.get("businessName") or "",
-        "address":      gbp_data.get("address") or "",
-        "phone":        gbp_data.get("phone") or web_data.get("contact") or "",
-        "hours":        gbp_data.get("hours") or "",
-        "rating":       gbp_data.get("rating") or "",
-        "category":     gbp_data.get("category") or "",
-        "about":        web_data.get("about") or "",
-        "services":     web_data.get("services") or "",
-        "pricing":      web_data.get("pricing") or "",
-        "contact":      web_data.get("contact") or "",
-        "faqs":         web_data.get("faqs") or "",
-        "fetched":      True,
+        "businessName":  gbp_data.get("businessName") or "",
+        "address":       gbp_data.get("address") or "",
+        "phone":         gbp_data.get("phone") or web_data.get("contact") or "",
+        "hours":         gbp_data.get("hours") or "",
+        "rating":        gbp_data.get("rating") or "",
+        "category":      gbp_data.get("category") or "",
+        "about":         web_data.get("about") or "",
+        "services":      web_data.get("services") or "",
+        "pricing":       web_data.get("pricing") or "",
+        "contact":       web_data.get("contact") or "",
+        "faqs":          web_data.get("faqs") or "",
+        "location":      "",
+        "instagram":     "",
+        "facebook":      "",
+        "otaPlatforms":  "",
+        "activities":    "",
+        "paidActivities":"",
+        "accommodations":"",
+        "events":        "",
+        "fetched":       True,
     }
 
     # Persist to Firestore
