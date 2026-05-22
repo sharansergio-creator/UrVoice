@@ -403,7 +403,31 @@ async def _scrape_website(website_url: str) -> dict:
 
     combined_soup = BeautifulSoup("".join(pages_html), "lxml")
 
-    # Remove nav / header / footer / scripts / styles noise
+    # ── Extract address BEFORE stripping footer (addresses live in footers) ──
+    # 1. Structured microdata / schema.org
+    addr_tag = combined_soup.find(attrs={"itemprop": "address"}) or \
+               combined_soup.find(class_=re.compile(r"address|location|map-address", re.I)) or \
+               combined_soup.find(id=re.compile(r"address|location|contact", re.I))
+    if addr_tag:
+        result["address"] = addr_tag.get_text(" ", strip=True)[:200]
+    else:
+        # 2. Footer text — look for postcode / PIN patterns
+        footer = combined_soup.find("footer")
+        footer_text = footer.get_text(" ", strip=True) if footer else ""
+        m = re.search(
+            r"[\w\s,\-\.]+(?:Road|Street|Nagar|Layout|Colony|Village|District|Taluk|Rd|St|NH|SH)"
+            r"[\w\s,\-\.]*(?:\d{6}|\d{5})",
+            footer_text, re.I
+        )
+        if m:
+            result["address"] = m.group(0).strip()[:200]
+        else:
+            # 3. Any 6-digit PIN in footer
+            m2 = re.search(r"[\w\s,\-\.]{10,80}\d{6}", footer_text)
+            if m2:
+                result["address"] = m2.group(0).strip()[:200]
+
+    # Remove nav / header / footer / scripts / styles noise for general text
     for tag in combined_soup.select("nav, header, footer, script, style, noscript"):
         tag.decompose()
 
