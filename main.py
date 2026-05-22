@@ -198,108 +198,70 @@ async def _fetch_html(url: str, follow_redirects: bool = True) -> str:
         return resp.text
 
 
-def _text(soup: BeautifulSoup, *selectors) -> str:
-    """Return stripped text of the first matching selector."""
-    for sel in selectors:
-        tag = soup.select_one(sel)
-        if tag:
-            return tag.get_text(" ", strip=True)
+async def _jina_read(url: str) -> str:
+    """Convert any URL to clean LLM-readable text via Jina Reader (no API key needed).
+    Handles JS-rendered pages, Google Maps, and regular websites."""
+    try:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": _BROWSER_HEADERS["User-Agent"], "X-Return-Format": "text"},
+            follow_redirects=True,
+            timeout=25,
+        ) as client:
+            resp = await client.get(f"https://r.jina.ai/{url}")
+            if resp.status_code == 200:
+                return resp.text[:8000]
+            print(f"Jina returned {resp.status_code} for {url}")
+    except Exception as e:
+        print(f"Jina read error for {url}: {e}")
     return ""
 
 
-def _all_text(soup: BeautifulSoup, *selectors) -> list[str]:
-    """Return a list of stripped text for every matching element."""
-    results = []
-    for sel in selectors:
-        for tag in soup.select(sel):
-            t = tag.get_text(" ", strip=True)
-            if t:
-                results.append(t)
-    return results
-
-
 async def _scrape_gbp(gbp_url: str) -> dict:
-    """Extract structured data from a Google Business Profile share URL."""
+    """Extract business info from a Google Business Profile URL via Jina Reader + Groq."""
     result = {"businessName": "", "address": "", "phone": "", "hours": "",
-               "rating": "", "category": ""}
-    html = ""
-    try:
-        html = await _fetch_html(gbp_url)
-        soup = BeautifulSoup(html, "lxml")
+              "rating": "", "category": ""}
 
-        # Business name — og:title or <title>
-        og_title = soup.find("meta", property="og:title")
-        result["businessName"] = (
-            og_title["content"].strip()
-            if og_title and og_title.get("content")
-            else soup.title.string.strip() if soup.title else ""
-        )
+    text = await _jina_read(gbp_url)
+    if not text.strip():
+        result["businessName"] = _name_from_gbp_url(gbp_url)
+        return result
 
-        full_text = soup.get_text(" ", strip=True)
-
-        # Address — look for structured microdata or heuristic
-        addr_tag = soup.find(attrs={"itemprop": "address"})
-        if addr_tag:
-            result["address"] = addr_tag.get_text(" ", strip=True)
-        else:
-            # Heuristic: first occurrence of a postcode-like pattern
-            m = re.search(r"[\w\s,]+(\d{6}|\d{5}(-\d{4})?)[\w\s,]*", full_text)
-            if m:
-                result["address"] = m.group(0).strip()[:120]
-
-        # Phone
-        phone_tag = soup.find(attrs={"itemprop": "telephone"})
-        if phone_tag:
-            result["phone"] = phone_tag.get_text(" ", strip=True)
-        else:
-            m = re.search(r"(\+?\d[\d\s\-().]{7,}\d)", full_text)
-            if m:
-                result["phone"] = m.group(1).strip()
-
-        # Rating
-        rating_tag = soup.find(attrs={"itemprop": "ratingValue"})
-        review_tag = soup.find(attrs={"itemprop": "reviewCount"})
-        if rating_tag:
-            rating = rating_tag.get("content") or rating_tag.get_text(strip=True)
-            reviews = ""
-            if review_tag:
-                reviews = review_tag.get("content") or review_tag.get_text(strip=True)
-            result["rating"] = f"{rating} ({reviews} reviews)".strip() if reviews else rating
-        else:
-            m = re.search(r"(\d\.\d)\s*[\u2605★]?\s*[\(]?(\d[\d,]+)\s*reviews?", full_text, re.I)
-            if m:
-                result["rating"] = f"{m.group(1)} ({m.group(2)} reviews)"
-
-        # Business hours — og:description often contains them
-        og_desc = soup.find("meta", property="og:description")
-        if og_desc and og_desc.get("content"):
-            result["hours"] = og_desc["content"].strip()[:300]
-
-        # Category
-        cat_tag = soup.find(attrs={"itemprop": "servesCuisine"}) or \
-                  soup.find(attrs={"itemprop": "category"})
-        if cat_tag:
-            result["category"] = cat_tag.get_text(" ", strip=True)
-
-        # Also try business name from URL if not found in HTML
-        if not result["businessName"]:
-            result["businessName"] = _name_from_gbp_url(gbp_url)
-
-    except Exception as e:
-        print(f"GBP scrape error: {e}")
-
-    # If address/phone still missing, use Groq on the GBP page text
-    if html and (not result["address"] or not result["phone"]):
+    if GROQ_API_KEY:
         try:
-            soup_text = BeautifulSoup(html, "lxml").get_text(" ", strip=True)
-            groq_data = await _groq_extract(soup_text, include_address=True)
-            if not result["address"] and groq_data.get("address"):
-                result["address"] = groq_data["address"]
-            if not result["phone"] and groq_data.get("phone"):
-                result["phone"] = groq_data["phone"]
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Extract business information from this Google Maps/Business Profile page text. "
+                                    "Return ONLY a JSON object with these keys: "
+                                    "businessName, address, phone, hours, rating, category. "
+                                    "Use empty string for fields not found. No markdown, just JSON."
+                                ),
+                            },
+                            {"role": "user", "content": f"Extract:\n\n{text[:5000]}"},
+                        ],
+                        "max_tokens": 400,
+                        "temperature": 0.1,
+                    },
+                )
+            data = resp.json()
+            parsed = _parse_llm_json(data["choices"][0]["message"]["content"].strip())
+            for key in result:
+                if parsed.get(key):
+                    result[key] = str(parsed[key])[:300]
         except Exception as e:
-            print(f"GBP Groq fallback error: {e}")
+            print(f"GBP Groq extract error: {e}")
 
+    if not result["businessName"]:
+        result["businessName"] = _name_from_gbp_url(gbp_url)
+
+    print(f"GBP extracted fields: {[k for k, v in result.items() if v]}")
     return result
 
 
@@ -377,122 +339,47 @@ _extract_with_groq = _groq_extract
 
 
 async def _scrape_website(website_url: str) -> dict:
-    """Extract about/services/pricing/address/contact/FAQ text from a website."""
+    """Extract business info from a website via Jina Reader + Groq."""
     result = {"about": "", "services": "", "pricing": "", "address": "", "contact": "", "faqs": ""}
-    pages_html: list[str] = []
 
-    # Fetch homepage
-    try:
-        homepage_html = await _fetch_html(website_url)
-        pages_html.append(homepage_html)
-    except Exception as e:
-        print(f"Website homepage fetch error: {e}")
+    base = website_url.rstrip("/")
+    # Fetch homepage + key sub-pages concurrently via Jina Reader
+    pages_to_fetch = [
+        website_url,
+        f"{base}/contact",
+        f"{base}/contact-us",
+        f"{base}/about",
+        f"{base}/services",
+        f"{base}/packages",
+    ]
+
+    raw_texts = await asyncio.gather(*[_jina_read(u) for u in pages_to_fetch], return_exceptions=True)
+    pages = [t for t in raw_texts if isinstance(t, str) and len(t.strip()) > 100]
+
+    if not pages:
+        print(f"Website scrape: no content retrieved for {website_url}")
         return result
 
-    # Try common sub-pages (including contact and pricing pages for address/rates)
-    base = website_url.rstrip("/")
-    for slug in ("/about", "/about-us", "/services", "/our-services",
-                 "/contact", "/contact-us", "/reach-us",
-                 "/packages", "/pricing", "/rates", "/tariff", "/rooms",
-                 "/faq", "/faqs"):
-        try:
-            html = await _fetch_html(f"{base}{slug}")
-            pages_html.append(html)
-        except Exception:
-            pass
+    combined = "\n\n---PAGE---\n\n".join(pages)[:7000]
 
-    combined_soup = BeautifulSoup("".join(pages_html), "lxml")
+    # Single Groq call to extract all fields from the clean combined text
+    groq_data = await _groq_extract(combined, include_address=True)
+    result["about"]    = groq_data.get("about", "")
+    result["services"] = groq_data.get("services", "")
+    result["pricing"]  = groq_data.get("pricing", "")
+    result["address"]  = groq_data.get("address", "")
 
-    # ── Extract address BEFORE stripping footer (addresses live in footers) ──
-    # 1. Structured microdata / schema.org
-    addr_tag = combined_soup.find(attrs={"itemprop": "address"}) or \
-               combined_soup.find(class_=re.compile(r"address|location|map-address", re.I)) or \
-               combined_soup.find(id=re.compile(r"address|location|contact", re.I))
-    if addr_tag:
-        result["address"] = addr_tag.get_text(" ", strip=True)[:200]
-    else:
-        # 2. Footer text — look for postcode / PIN patterns
-        footer = combined_soup.find("footer")
-        footer_text = footer.get_text(" ", strip=True) if footer else ""
-        m = re.search(
-            r"[\w\s,\-\.]+(?:Road|Street|Nagar|Layout|Colony|Village|District|Taluk|Rd|St|NH|SH)"
-            r"[\w\s,\-\.]*(?:\d{6}|\d{5})",
-            footer_text, re.I
-        )
-        if m:
-            result["address"] = m.group(0).strip()[:200]
-        else:
-            # 3. Any 6-digit PIN in footer
-            m2 = re.search(r"[\w\s,\-\.]{10,80}\d{6}", footer_text)
-            if m2:
-                result["address"] = m2.group(0).strip()[:200]
-
-    # Remove nav / header / footer / scripts / styles noise for general text
-    for tag in combined_soup.select("nav, header, footer, script, style, noscript"):
-        tag.decompose()
-
-    full_text = combined_soup.get_text(" ", strip=True)
-
-    # About
-    about_section = combined_soup.find(
-        lambda t: t.name in ("section", "div", "article")
-        and re.search(r"about", t.get("id", "") + " ".join(t.get("class", [])), re.I)
-    )
-    if about_section:
-        result["about"] = about_section.get_text(" ", strip=True)[:600]
-    else:
-        m = re.search(r"(?i)about\s+us[:\-]?\s*(.{50,400})", full_text)
-        if m:
-            result["about"] = m.group(1).strip()[:400]
-
-    # Services — look for lists inside a services section
-    svc_items = _all_text(
-        combined_soup,
-        "[id*='service'] li, [class*='service'] li",
-        "[id*='Service'] li, [class*='Service'] li",
-    )
-    if svc_items:
-        result["services"] = "; ".join(svc_items[:15])
-    else:
-        m = re.search(r"(?i)services?[:\-]?\s*(.{30,400})", full_text)
-        if m:
-            result["services"] = m.group(1).strip()[:400]
-
-    # Pricing
-    prices = re.findall(r"(?:Rs\.?|INR|\$|₹)\s*[\d,]+(?:\.\d{1,2})?", full_text)
-    if prices:
-        result["pricing"] = ", ".join(dict.fromkeys(prices[:10]))
-    else:
-        m = re.search(r"(?i)pric(?:e|ing)[:\-]?\s*(.{20,200})", full_text)
-        if m:
-            result["pricing"] = m.group(1).strip()[:200]
-
-    # Contact
-    phones = re.findall(r"(\+?\d[\d\s\-().]{7,}\d)", full_text)
-    emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", full_text)
-    contact_parts = []
+    # Extract contact details via regex (reliable in clean text)
+    phones = re.findall(r"(\+?\d[\d\s\-().]{7,}\d)", combined)
+    emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", combined)
+    parts = []
     if phones:
-        contact_parts.append("Ph: " + ", ".join(dict.fromkeys(phones[:3])))
+        parts.append("Ph: " + ", ".join(dict.fromkeys(phones[:3])))
     if emails:
-        contact_parts.append("Email: " + ", ".join(dict.fromkeys(emails[:3])))
-    result["contact"] = "  ".join(contact_parts)
+        parts.append("Email: " + ", ".join(dict.fromkeys(emails[:3])))
+    result["contact"] = "  ".join(parts)
 
-    # FAQs
-    faq_items = _all_text(
-        combined_soup,
-        "[id*='faq'] h3, [id*='faq'] h4, [class*='faq'] h3, [class*='faq'] h4",
-        "[id*='FAQ'] h3, [id*='FAQ'] h4, [class*='FAQ'] h3, [class*='FAQ'] h4",
-    )
-    if faq_items:
-        result["faqs"] = "; ".join(faq_items[:10])
-
-    # Use Groq to extract all remaining fields (about, services, pricing, address)
-    if not result["about"] or not result["services"] or not result["pricing"] or not result["address"]:
-        groq_data = await _groq_extract(full_text, include_address=True)
-        for field in ("about", "services", "pricing", "address"):
-            if not result[field] and groq_data.get(field):
-                result[field] = groq_data[field]
-
+    print(f"Website extracted fields: {[k for k, v in result.items() if v]}")
     return result
 
 
