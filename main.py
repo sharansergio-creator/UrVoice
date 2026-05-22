@@ -192,7 +192,7 @@ async def audio_stream(websocket: WebSocket):
                                     "transcript": transcript,
                                     "aiResponse": ai_response,
                                     "language": detected_lang,
-                                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                                    "timestamp": datetime.utcnow().strftime("%I:%M %p"),
                                 }
                                 exchanges.append(exchange)
                                 if session_doc_ref:
@@ -216,6 +216,18 @@ async def audio_stream(websocket: WebSocket):
 
     except Exception as e:
         print(f"WebSocket error: {e}")
+    finally:
+        if session_doc_ref and session_id:
+            try:
+                db = get_db()
+                db.collection("call_sessions").document(session_id).update({
+                    "status": "completed",
+                    "endTime": SERVER_TIMESTAMP,
+                    "totalExchanges": len(exchanges)
+                })
+                print(f"Session {session_id} completed with {len(exchanges)} exchanges")
+            except Exception as fe:
+                print(f"Session finalize error: {fe}")
 
 async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
     try:
