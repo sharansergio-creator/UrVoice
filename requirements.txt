@@ -7,3 +7,5 @@ websockets
 numpy
 cartesia
 firebase-admin
+beautifulsoup4
+lxml

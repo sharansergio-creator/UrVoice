@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 from twilio.twiml.voice_response import VoiceResponse, Connect
 import os
 import json
@@ -9,12 +10,14 @@ import wave
 import io
 import asyncio
 import uuid
+import re
 import numpy as np
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 load_dotenv()
 
@@ -83,6 +86,261 @@ async def fetch_business_context(user_id: str) -> str:
     except Exception as e:
         print(f"fetch_business_context error: {e}")
         return ""
+
+
+# ---------------------------------------------------------------------------
+# /fetch-business-context helpers
+# ---------------------------------------------------------------------------
+
+class FetchBusinessContextRequest(BaseModel):
+    gbp_url: str = ""
+    website_url: str = ""
+    user_id: str = BUSINESS_USER_ID
+
+
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+async def _fetch_html(url: str, follow_redirects: bool = True) -> str:
+    """Fetch a URL and return the decoded HTML body."""
+    async with httpx.AsyncClient(
+        headers=_BROWSER_HEADERS,
+        follow_redirects=follow_redirects,
+        timeout=15,
+    ) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.text
+
+
+def _text(soup: BeautifulSoup, *selectors) -> str:
+    """Return stripped text of the first matching selector."""
+    for sel in selectors:
+        tag = soup.select_one(sel)
+        if tag:
+            return tag.get_text(" ", strip=True)
+    return ""
+
+
+def _all_text(soup: BeautifulSoup, *selectors) -> list[str]:
+    """Return a list of stripped text for every matching element."""
+    results = []
+    for sel in selectors:
+        for tag in soup.select(sel):
+            t = tag.get_text(" ", strip=True)
+            if t:
+                results.append(t)
+    return results
+
+
+async def _scrape_gbp(gbp_url: str) -> dict:
+    """Extract structured data from a Google Business Profile share URL."""
+    result = {"businessName": "", "address": "", "phone": "", "hours": "",
+               "rating": "", "category": ""}
+    try:
+        html = await _fetch_html(gbp_url)
+        soup = BeautifulSoup(html, "lxml")
+
+        # Business name — og:title or <title>
+        og_title = soup.find("meta", property="og:title")
+        result["businessName"] = (
+            og_title["content"].strip()
+            if og_title and og_title.get("content")
+            else soup.title.string.strip() if soup.title else ""
+        )
+
+        full_text = soup.get_text(" ", strip=True)
+
+        # Address — look for structured microdata or heuristic
+        addr_tag = soup.find(attrs={"itemprop": "address"})
+        if addr_tag:
+            result["address"] = addr_tag.get_text(" ", strip=True)
+        else:
+            # Heuristic: first occurrence of a postcode-like pattern
+            m = re.search(r"[\w\s,]+(\d{6}|\d{5}(-\d{4})?)[\w\s,]*", full_text)
+            if m:
+                result["address"] = m.group(0).strip()[:120]
+
+        # Phone
+        phone_tag = soup.find(attrs={"itemprop": "telephone"})
+        if phone_tag:
+            result["phone"] = phone_tag.get_text(" ", strip=True)
+        else:
+            m = re.search(r"(\+?\d[\d\s\-().]{7,}\d)", full_text)
+            if m:
+                result["phone"] = m.group(1).strip()
+
+        # Rating
+        rating_tag = soup.find(attrs={"itemprop": "ratingValue"})
+        review_tag = soup.find(attrs={"itemprop": "reviewCount"})
+        if rating_tag:
+            rating = rating_tag.get("content") or rating_tag.get_text(strip=True)
+            reviews = ""
+            if review_tag:
+                reviews = review_tag.get("content") or review_tag.get_text(strip=True)
+            result["rating"] = f"{rating} ({reviews} reviews)".strip() if reviews else rating
+        else:
+            m = re.search(r"(\d\.\d)\s*[\u2605★]?\s*[\(]?(\d[\d,]+)\s*reviews?", full_text, re.I)
+            if m:
+                result["rating"] = f"{m.group(1)} ({m.group(2)} reviews)"
+
+        # Business hours — og:description often contains them
+        og_desc = soup.find("meta", property="og:description")
+        if og_desc and og_desc.get("content"):
+            result["hours"] = og_desc["content"].strip()[:300]
+
+        # Category
+        cat_tag = soup.find(attrs={"itemprop": "servesCuisine"}) or \
+                  soup.find(attrs={"itemprop": "category"})
+        if cat_tag:
+            result["category"] = cat_tag.get_text(" ", strip=True)
+
+    except Exception as e:
+        print(f"GBP scrape error: {e}")
+    return result
+
+
+async def _scrape_website(website_url: str) -> dict:
+    """Extract about/services/pricing/contact/FAQ text from a website."""
+    result = {"about": "", "services": "", "pricing": "", "contact": "", "faqs": ""}
+    pages_html: list[str] = []
+
+    # Fetch homepage
+    try:
+        homepage_html = await _fetch_html(website_url)
+        pages_html.append(homepage_html)
+    except Exception as e:
+        print(f"Website homepage fetch error: {e}")
+        return result
+
+    # Try common sub-pages
+    base = website_url.rstrip("/")
+    for slug in ("/about", "/about-us", "/services", "/our-services", "/faq", "/faqs"):
+        try:
+            html = await _fetch_html(f"{base}{slug}")
+            pages_html.append(html)
+        except Exception:
+            pass
+
+    combined_soup = BeautifulSoup("".join(pages_html), "lxml")
+
+    # Remove nav / header / footer / scripts / styles noise
+    for tag in combined_soup.select("nav, header, footer, script, style, noscript"):
+        tag.decompose()
+
+    full_text = combined_soup.get_text(" ", strip=True)
+
+    # About
+    about_section = combined_soup.find(
+        lambda t: t.name in ("section", "div", "article")
+        and re.search(r"about", t.get("id", "") + " ".join(t.get("class", [])), re.I)
+    )
+    if about_section:
+        result["about"] = about_section.get_text(" ", strip=True)[:600]
+    else:
+        m = re.search(r"(?i)about\s+us[:\-]?\s*(.{50,400})", full_text)
+        if m:
+            result["about"] = m.group(1).strip()[:400]
+
+    # Services — look for lists inside a services section
+    svc_items = _all_text(
+        combined_soup,
+        "[id*='service'] li, [class*='service'] li",
+        "[id*='Service'] li, [class*='Service'] li",
+    )
+    if svc_items:
+        result["services"] = "; ".join(svc_items[:15])
+    else:
+        m = re.search(r"(?i)services?[:\-]?\s*(.{30,400})", full_text)
+        if m:
+            result["services"] = m.group(1).strip()[:400]
+
+    # Pricing
+    prices = re.findall(r"(?:Rs\.?|INR|\$|₹)\s*[\d,]+(?:\.\d{1,2})?", full_text)
+    if prices:
+        result["pricing"] = ", ".join(dict.fromkeys(prices[:10]))
+    else:
+        m = re.search(r"(?i)pric(?:e|ing)[:\-]?\s*(.{20,200})", full_text)
+        if m:
+            result["pricing"] = m.group(1).strip()[:200]
+
+    # Contact
+    phones = re.findall(r"(\+?\d[\d\s\-().]{7,}\d)", full_text)
+    emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", full_text)
+    contact_parts = []
+    if phones:
+        contact_parts.append("Ph: " + ", ".join(dict.fromkeys(phones[:3])))
+    if emails:
+        contact_parts.append("Email: " + ", ".join(dict.fromkeys(emails[:3])))
+    result["contact"] = "  ".join(contact_parts)
+
+    # FAQs
+    faq_items = _all_text(
+        combined_soup,
+        "[id*='faq'] h3, [id*='faq'] h4, [class*='faq'] h3, [class*='faq'] h4",
+        "[id*='FAQ'] h3, [id*='FAQ'] h4, [class*='FAQ'] h3, [class*='FAQ'] h4",
+    )
+    if faq_items:
+        result["faqs"] = "; ".join(faq_items[:10])
+
+    return result
+
+
+@app.post("/fetch-business-context")
+async def fetch_business_context_endpoint(body: FetchBusinessContextRequest):
+    gbp_data: dict = {}
+    web_data: dict = {}
+
+    # Run GBP and website scrapes concurrently
+    tasks = []
+    if body.gbp_url:
+        tasks.append(("gbp", asyncio.create_task(_scrape_gbp(body.gbp_url))))
+    if body.website_url:
+        tasks.append(("web", asyncio.create_task(_scrape_website(body.website_url))))
+
+    for key, task in tasks:
+        try:
+            data = await task
+            if key == "gbp":
+                gbp_data = data
+            else:
+                web_data = data
+        except Exception as e:
+            print(f"{key} scrape task error: {e}")
+
+    result = {
+        "businessName": gbp_data.get("businessName") or "",
+        "address":      gbp_data.get("address") or "",
+        "phone":        gbp_data.get("phone") or web_data.get("contact") or "",
+        "hours":        gbp_data.get("hours") or "",
+        "rating":       gbp_data.get("rating") or "",
+        "category":     gbp_data.get("category") or "",
+        "about":        web_data.get("about") or "",
+        "services":     web_data.get("services") or "",
+        "pricing":      web_data.get("pricing") or "",
+        "contact":      web_data.get("contact") or "",
+        "faqs":         web_data.get("faqs") or "",
+        "fetched":      True,
+    }
+
+    # Persist to Firestore
+    try:
+        db = get_db()
+        db.collection("business_context").document(body.user_id).set(
+            result, merge=True
+        )
+        print(f"Saved business context for user {body.user_id}")
+    except Exception as e:
+        print(f"Firestore save error: {e}")
+
+    return result
 
 
 @app.get("/")
