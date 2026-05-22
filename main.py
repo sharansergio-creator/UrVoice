@@ -15,7 +15,7 @@ import numpy as np
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion
+from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion, Increment
 from datetime import datetime
 from bs4 import BeautifulSoup
 
@@ -495,6 +495,94 @@ async def incoming_call(request: Request):
     response.append(connect)
     return PlainTextResponse(str(response), media_type="application/xml")
 
+async def get_caller_info(user_id: str, caller_number: str) -> dict:
+    """Retrieve caller info from Firestore contact_permissions/{user_id}/contacts/{caller_number}."""
+    try:
+        db = get_db()
+        doc = (
+            db.collection("contact_permissions")
+            .document(user_id)
+            .collection("contacts")
+            .document(caller_number)
+            .get()
+        )
+        if doc.exists:
+            data = doc.to_dict()
+            return {
+                "name": data.get("name"),
+                "type": data.get("type", "UNKNOWN"),
+                "totalCalls": data.get("totalCalls", 0),
+            }
+    except Exception as e:
+        print(f"get_caller_info error: {e}")
+    return {"name": None, "type": "UNKNOWN", "totalCalls": 0}
+
+
+async def save_caller_info(user_id: str, caller_number: str, name: str, call_type: str):
+    """Save or update caller info in Firestore contact_permissions/{user_id}/contacts/{caller_number}."""
+    try:
+        db = get_db()
+        ref = (
+            db.collection("contact_permissions")
+            .document(user_id)
+            .collection("contacts")
+            .document(caller_number)
+        )
+        doc = ref.get()
+        if doc.exists:
+            ref.update({
+                "name": name,
+                "type": call_type,
+                "lastCall": SERVER_TIMESTAMP,
+                "totalCalls": Increment(1),
+            })
+        else:
+            ref.set({
+                "name": name,
+                "type": call_type,
+                "firstCall": SERVER_TIMESTAMP,
+                "lastCall": SERVER_TIMESTAMP,
+                "totalCalls": 1,
+            })
+        print(f"Saved caller info: {caller_number} -> {name} ({call_type})")
+    except Exception as e:
+        print(f"save_caller_info error: {e}")
+
+
+async def update_business_hours_check(user_id: str) -> bool:
+    """Return True if current time falls within any enabled business hour slot, False if closed."""
+    try:
+        db = get_db()
+        doc = db.collection("business_context").document(user_id).get()
+        if not doc.exists:
+            return True
+        data = doc.to_dict()
+        slots = data.get("businessHours", [])
+        if not slots:
+            return True
+        now = datetime.now()
+        day_name = now.strftime("%A")
+        current_minutes = now.hour * 60 + now.minute
+        for slot in slots:
+            if not slot.get("enabled", False):
+                continue
+            if slot.get("day", "").lower() != day_name.lower():
+                continue
+            open_time = slot.get("open", "00:00")
+            close_time = slot.get("close", "23:59")
+            try:
+                open_h, open_m = map(int, open_time.split(":"))
+                close_h, close_m = map(int, close_time.split(":"))
+                if open_h * 60 + open_m <= current_minutes <= close_h * 60 + close_m:
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception as e:
+        print(f"update_business_hours_check error: {e}")
+        return True
+
+
 @app.websocket("/audio-stream")
 async def audio_stream(websocket: WebSocket):
     await websocket.accept()
@@ -509,6 +597,11 @@ async def audio_stream(websocket: WebSocket):
     session_id = None
     session_doc_ref = None
     exchanges = []
+    caller_name = None
+    caller_type = "UNKNOWN"
+    name_attempts = 0
+    is_blocked = False
+    name_collected = False
     SILENCE_LIMIT = 15
     RMS_THRESHOLD = 400
 
@@ -525,7 +618,34 @@ async def audio_stream(websocket: WebSocket):
                 # Fetch business context once per call
                 business_context = await fetch_business_context(BUSINESS_USER_ID)
                 print(f"Business context loaded: {bool(business_context)}")
-                # Create a session document in Firestore
+
+                # Extract business name from context for use in greetings
+                biz_name = "our business"
+                if business_context:
+                    first_line = business_context.splitlines()[0]
+                    raw_name = first_line.replace("You are the AI phone assistant for ", "")
+                    comma_idx = raw_name.find(",")
+                    biz_name = (raw_name[:comma_idx] if comma_idx != -1 else raw_name).strip().rstrip(".")
+
+                # Identify caller from contact_permissions
+                caller_info = await get_caller_info(BUSINESS_USER_ID, caller_number)
+                caller_name = caller_info["name"]
+                caller_type = caller_info["type"]
+                name_collected = caller_name is not None
+                is_blocked = caller_type == "BLOCKED"
+
+                # Select greeting based on caller type
+                if caller_type == "BLOCKED":
+                    greeting = "I'm sorry, this number is not able to reach us. Goodbye."
+                elif caller_type == "VIP":
+                    greeting = f"Hello! Thank you for calling {biz_name}, please hold while we connect you."
+                    # TODO: Send FCM notification to owner
+                elif caller_type == "CUSTOMER" and caller_name:
+                    greeting = f"Welcome back {caller_name}! Thank you for calling {biz_name}, how can I help you today?"
+                else:
+                    greeting = f"Thank you for calling {biz_name}, may I know who is calling please?"
+
+                # Create session document in Firestore
                 session_id = str(uuid.uuid4())
                 db = get_db()
                 session_doc_ref = db.collection("call_sessions").document(session_id)
@@ -533,20 +653,19 @@ async def audio_stream(websocket: WebSocket):
                     "sessionId": session_id,
                     "userId": BUSINESS_USER_ID,
                     "callerNumber": caller_number or "unknown",
+                    "callerName": caller_name,
+                    "category": caller_type,
                     "startTime": SERVER_TIMESTAMP,
                     "status": "active",
                     "exchanges": [],
                 })
                 print(f"Session created: {session_id}")
+
                 is_playing = True
-                greeting = "Hello! How can I help you today?"
-                if business_context:
-                    # Extract business name for greeting
-                    first_line = business_context.splitlines()[0]
-                    biz_name = first_line.replace("You are the AI phone assistant for ", "").rstrip(".")
-                    greeting = f"Hello! Thank you for calling {biz_name}. How can I help you today?"
                 await send_audio_response(websocket, stream_sid, greeting)
                 is_playing = False
+                if is_blocked:
+                    break
 
             elif data["event"] == "media":
                 if is_playing:
@@ -577,8 +696,73 @@ async def audio_stream(websocket: WebSocket):
 
                         if transcript and transcript.strip():
                             conversation_history.append({"role": "user", "content": transcript})
-                            ai_response = await get_ai_response(conversation_history, business_context)
+
+                            # Augment system context with name-collection directive for UNKNOWN callers
+                            effective_context = business_context
+                            if not name_collected and name_attempts < 2:
+                                effective_context = business_context + (
+                                    "\n\nThe caller has not given their name yet. Your ONLY job right now "
+                                    "is to get their name. Ask: 'May I know your name please?' "
+                                    "If they give a name, start your response with 'NAME:[their name]' "
+                                    "on its own line, then continue normally on the next line. "
+                                    "If they don't give a clear name, ask once more politely."
+                                )
+
+                            ai_response = await get_ai_response(conversation_history, effective_context)
                             print(f"AI response: {ai_response}")
+
+                            # Name extraction for UNKNOWN callers
+                            if not name_collected and name_attempts < 2 and ai_response:
+                                if ai_response.startswith("NAME:"):
+                                    rest = ai_response[5:]
+                                    newline_pos = rest.find("\n")
+                                    if newline_pos != -1:
+                                        extracted_name = rest[:newline_pos].strip()
+                                        ai_response = rest[newline_pos + 1:].strip()
+                                    else:
+                                        name_match = re.match(
+                                            r"([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s+(.*)", rest, re.DOTALL
+                                        )
+                                        if name_match:
+                                            extracted_name = name_match.group(1).strip()
+                                            ai_response = name_match.group(2).strip()
+                                        else:
+                                            extracted_name = rest.strip()
+                                            ai_response = ""
+                                    if extracted_name:
+                                        caller_name = extracted_name
+                                        name_collected = True
+                                        caller_type = "CUSTOMER"
+                                        asyncio.create_task(
+                                            save_caller_info(BUSINESS_USER_ID, caller_number, caller_name, "CUSTOMER")
+                                        )
+                                        if session_doc_ref:
+                                            try:
+                                                session_doc_ref.update({
+                                                    "callerName": caller_name,
+                                                    "category": "CUSTOMER",
+                                                })
+                                            except Exception as e:
+                                                print(f"Session name update error: {e}")
+                                        print(f"Caller name identified: {caller_name}")
+                                else:
+                                    name_attempts += 1
+                                    if name_attempts >= 2:
+                                        asyncio.create_task(
+                                            save_caller_info(BUSINESS_USER_ID, caller_number, "Unknown", "SPAM")
+                                        )
+                                        if session_doc_ref:
+                                            try:
+                                                session_doc_ref.update({"category": "SPAM"})
+                                            except Exception as e:
+                                                print(f"Session spam update error: {e}")
+                                        print(f"Caller {caller_number} logged as SPAM after {name_attempts} name attempts")
+                                        sorry_msg = "I'm sorry I couldn't get your name, please call back when ready. Goodbye."
+                                        is_playing = True
+                                        await send_audio_response(websocket, stream_sid, sorry_msg)
+                                        is_playing = False
+                                        break
+
                             if ai_response and stream_sid:
                                 conversation_history.append({"role": "assistant", "content": ai_response})
                                 is_playing = True
