@@ -285,6 +285,56 @@ async def _scrape_gbp(gbp_url: str) -> dict:
     return result
 
 
+async def _extract_with_groq(full_text: str) -> dict:
+    """Use Groq LLM to extract about/services/pricing from raw website text."""
+    extracted = {"about": "", "services": "", "pricing": ""}
+    if not GROQ_API_KEY or not full_text.strip():
+        return extracted
+    trimmed = full_text[:4000]
+    try:
+        async with httpx.AsyncClient(timeout=25) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You extract business info from website text. "
+                                "Return ONLY a JSON object with exactly these keys: "
+                                "\"about\" (2-3 sentences describing what the business does), "
+                                "\"services\" (comma-separated list of services or products), "
+                                "\"pricing\" (pricing details if present, else empty string). "
+                                "No extra text, no markdown, just the JSON."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Extract business info:\n\n{trimmed}",
+                        },
+                    ],
+                    "max_tokens": 500,
+                    "temperature": 0.1,
+                },
+            )
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        m = re.search(r"\{.*\}", content, re.DOTALL)
+        if m:
+            parsed = json.loads(m.group(0))
+            extracted["about"]    = str(parsed.get("about",    ""))[:600]
+            extracted["services"] = str(parsed.get("services", ""))[:400]
+            extracted["pricing"]  = str(parsed.get("pricing",  ""))[:200]
+    except Exception as e:
+        print(f"Groq extraction error: {e}")
+    return extracted
+
+
 async def _scrape_website(website_url: str) -> dict:
     """Extract about/services/pricing/contact/FAQ text from a website."""
     result = {"about": "", "services": "", "pricing": "", "contact": "", "faqs": ""}
@@ -367,6 +417,16 @@ async def _scrape_website(website_url: str) -> dict:
     )
     if faq_items:
         result["faqs"] = "; ".join(faq_items[:10])
+
+    # If heuristics couldn't extract about/services/pricing, use Groq LLM
+    if not result["about"] or not result["services"]:
+        groq_data = await _extract_with_groq(full_text)
+        if not result["about"] and groq_data["about"]:
+            result["about"] = groq_data["about"]
+        if not result["services"] and groq_data["services"]:
+            result["services"] = groq_data["services"]
+        if not result["pricing"] and groq_data["pricing"]:
+            result["pricing"] = groq_data["pricing"]
 
     return result
 
