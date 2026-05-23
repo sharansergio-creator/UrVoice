@@ -1344,18 +1344,38 @@ def mulaw_chunk_to_pcm(mulaw_bytes: bytes) -> bytes:
 
 async def transcribe(audio_bytes: bytes, language_hint: str = "en-IN") -> str:
     try:
+        # Map Sarvam language codes to ElevenLabs language codes
+        lang_map = {
+            "en-IN": "en",
+            "kn-IN": "kan",
+            "hi-IN": "hi",
+            "ta-IN": "ta",
+            "te-IN": "te"
+        }
+        elevenlabs_lang = lang_map.get(language_hint, "en")
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://api.sarvam.ai/speech-to-text",
-                headers={"api-subscription-key": SARVAM_API_KEY},
+                "https://api.elevenlabs.io/v1/speech-to-text",
+                headers={"xi-api-key": ELEVENLABS_API_KEY},
                 files={"file": ("audio.wav", audio_bytes, "audio/wav")},
-                data={"language_code": language_hint, "model": "saarika:v2.5"},
+                data={
+                    "model_id": "scribe_v1",
+                    "language_code": elevenlabs_lang,
+                },
                 timeout=30
             )
-            result = response.json()
-            return result.get("transcript", "")
+            if response.status_code == 200:
+                result = response.json()
+                transcript = result.get("text", "")
+                detected = result.get("language_code", elevenlabs_lang)
+                print(f"ElevenLabs STT: '{transcript[:50]}' (lang: {detected})")
+                return transcript
+            else:
+                print(f"ElevenLabs STT error: {response.status_code} {response.text}")
+                return ""
     except Exception as e:
-        print(f"Sarvam error: {e}")
+        print(f"ElevenLabs STT error: {e}")
         return ""
 
 async def get_ai_response(conversation_history: list, business_context: str = "") -> str:
