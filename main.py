@@ -1166,9 +1166,20 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
             # Sarvam returns PCM — needs conversion
             voice_id = await get_elevenlabs_voice_id(user_id) if user_id else None
             if user_id and voice_id:
-                # ElevenLabs ulaw_8000 returns raw mulaw bytes — use directly
-                mulaw_audio = audio_bytes
-                print(f"ElevenLabs audio bytes: {len(audio_bytes)}, first 4 bytes: {audio_bytes[:4].hex()}")
+                try:
+                    from pydub import AudioSegment
+                    import io as _io
+                    # Decode MP3 from ElevenLabs
+                    mp3_segment = AudioSegment.from_mp3(_io.BytesIO(audio_bytes))
+                    # Resample to 8000Hz mono 16-bit
+                    mp3_segment = mp3_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+                    pcm_bytes = mp3_segment.raw_data
+                    mulaw_audio = pcm_to_mulaw(pcm_bytes)
+                    print(f"ElevenLabs converted: {len(audio_bytes)} MP3 -> {len(pcm_bytes)} PCM -> {len(mulaw_audio)} mulaw")
+                except Exception as conv_err:
+                    print(f"ElevenLabs conversion error: {conv_err}")
+                    fallback = await sarvam_tts(text, "en-IN")
+                    mulaw_audio = pcm_to_mulaw(fallback) if fallback else b""
             else:
                 mulaw_audio = pcm_to_mulaw(audio_bytes)  # convert PCM from Sarvam
             payload = base64.b64encode(mulaw_audio).decode("utf-8")
@@ -1278,7 +1289,7 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 json={
                     "text": text,
                     "model_id": "eleven_flash_v2_5",
-                    "output_format": "ulaw_8000",
+                    "output_format": "mp3_22050_32",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
