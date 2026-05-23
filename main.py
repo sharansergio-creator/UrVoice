@@ -770,11 +770,17 @@ async def audio_stream(websocket: WebSocket):
                 is_playing = True
                 await send_audio_response(websocket, stream_sid, greeting)
                 is_playing = False
+                audio_chunks.clear()
+                speaking = False
+                silence_frames = 0
                 if is_blocked:
                     break
 
             elif data["event"] == "media":
                 if is_playing:
+                    audio_chunks.clear()
+                    speaking = False
+                    silence_frames = 0
                     continue
 
                 raw_chunk = base64.b64decode(data["media"]["payload"])
@@ -869,6 +875,9 @@ async def audio_stream(websocket: WebSocket):
                                         is_playing = True
                                         await send_audio_response(websocket, stream_sid, sorry_msg)
                                         is_playing = False
+                                        audio_chunks.clear()
+                                        speaking = False
+                                        silence_frames = 0
                                         break
 
                             if ai_response and stream_sid:
@@ -876,6 +885,9 @@ async def audio_stream(websocket: WebSocket):
                                 is_playing = True
                                 await send_audio_response(websocket, stream_sid, ai_response)
                                 is_playing = False
+                                audio_chunks.clear()
+                                speaking = False
+                                silence_frames = 0
                                 detected_lang = detect_language(transcript)
                                 exchange = {
                                     "transcript": transcript,
