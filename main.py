@@ -26,11 +26,6 @@ app = FastAPI()
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
-EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
-EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
-EXOTEL_PHONE_NUMBER = os.getenv("EXOTEL_PHONE_NUMBER")
-
 # Initialize Firebase Admin SDK
 _firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
 if _firebase_creds_json and not firebase_admin._apps:
@@ -502,61 +497,46 @@ def root():
 
 @app.post("/incoming-call")
 async def incoming_call(request: Request):
-    # Exotel sends form data, not JSON
     form_data = await request.form()
     caller_number = form_data.get("From", "unknown")
-    called_number = form_data.get("To", "unknown")
     call_sid = form_data.get("CallSid", "unknown")
-
     host = request.headers.get("host")
-
-    # Return Exotel XML (ExoML) to connect to WebSocket stream
-    exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-        <Connect>
-            <Stream url="wss://{host}/audio-stream">
-                <Parameter name="CallSid" value="{call_sid}"/>
-                <Parameter name="CallFrom" value="{caller_number}"/>
-                <Parameter name="From" value="{caller_number}"/>
-            </Stream>
-        </Connect>
-    </Response>"""
-
-    return PlainTextResponse(exoml, media_type="application/xml")
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="wss://{host}/audio-stream">
+            <Parameter name="CallSid" value="{call_sid}"/>
+            <Parameter name="From" value="{caller_number}"/>
+        </Stream>
+    </Connect>
+</Response>"""
+    return PlainTextResponse(twiml, media_type="application/xml")
 
 
-@app.post("/call-incoming-notify")
-async def call_incoming_notify(request: Request):
-    # Exotel hits this BEFORE connecting the call
-    # We use this to send FCM notification to owner
+@app.post("/call-status")
+async def call_status(request: Request):
     form_data = await request.form()
     caller_number = form_data.get("From", "unknown")
     call_sid = form_data.get("CallSid", "unknown")
-
-    # Get caller info from Firestore
+    call_status = form_data.get("CallStatus", "unknown")
+    print(f"Call status: {call_status}, from: {caller_number}")
     caller_info = await get_caller_info(BUSINESS_USER_ID, caller_number)
     caller_name = caller_info.get("name") or caller_number
     caller_type = caller_info.get("type", "UNKNOWN")
-
-    # Send FCM notification to owner BEFORE call is answered
-    asyncio.create_task(send_fcm_notification(
-        BUSINESS_USER_ID,
-        "📞 Incoming Call",
-        f"{caller_name} is calling",
-        {
-            "callSid": call_sid,
-            "callerNumber": caller_number,
-            "callerName": caller_name,
-            "callerType": caller_type,
-            "type": "CALL_INCOMING"
-        }
-    ))
-
-    # Return passthrough ExoML to continue normal call flow
-    return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-        <Passthru/>
-    </Response>""", media_type="application/xml")
+    if call_status == "ringing":
+        asyncio.create_task(send_fcm_notification(
+            BUSINESS_USER_ID,
+            "📞 Incoming Call",
+            f"{caller_name} is calling",
+            {
+                "callSid": call_sid,
+                "callerNumber": caller_number,
+                "callerName": caller_name,
+                "callerType": caller_type,
+                "type": "CALL_INCOMING"
+            }
+        ))
+    return PlainTextResponse("", status_code=200)
 
 async def get_caller_info(user_id: str, caller_number: str) -> dict:
     """Retrieve caller info from Firestore contact_permissions/{user_id}/contacts/{caller_number}."""
