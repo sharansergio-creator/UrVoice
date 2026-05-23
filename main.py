@@ -298,7 +298,7 @@ async def _scrape_gbp(gbp_url: str) -> dict:
             gbp_response = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: gbp_client.models.generate_content(
-                    model="gemini-1.5-flash",
+                    model="gemini-2.5-flash",
                     contents=[{"role": "user", "parts": [{"text": f"Extract:\n\n{text[:5000]}"}]}],
                     config=genai.types.GenerateContentConfig(
                         system_instruction=(
@@ -350,7 +350,7 @@ def _name_from_gbp_url(url: str) -> str:
 
 
 async def _gemini_extract(text: str, include_address: bool = False) -> dict:
-    """Use gemini-1.5-flash to extract business fields from raw text."""
+    """Use gemini-2.5-flash to extract business fields from raw text."""
     keys = "about, services, pricing" + (", address, phone" if include_address else "")
     extracted = {"about": "", "services": "", "pricing": "", "address": "", "phone": ""}
     if not GEMINI_API_KEY or not text.strip():
@@ -361,7 +361,7 @@ async def _gemini_extract(text: str, include_address: bool = False) -> dict:
         response = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: extract_client.models.generate_content(
-                model="gemini-1.5-flash",
+                model="gemini-2.5-flash",
                 contents=[{"role": "user", "parts": [{"text": f"Extract business info:\n\n{trimmed}"}]}],
                 config=genai.types.GenerateContentConfig(
                     system_instruction=(
@@ -1007,7 +1007,7 @@ async def get_ai_response(conversation_history: list, business_context: str = ""
         response = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: client.models.generate_content(
-                model="gemini-1.5-flash",
+                model="gemini-2.5-flash",
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_content,
