@@ -814,7 +814,9 @@ async def audio_stream(websocket: WebSocket):
                                     "If they don't give a clear name, ask once more politely."
                                 )
 
-                            ai_response = await get_ai_response(conversation_history, effective_context)
+                            detected_input_lang = detect_language(transcript)
+                            lang_instruction = f"\n\nCRITICAL: The caller just spoke in {'Kannada' if detected_input_lang == 'kn-IN' else 'English' if detected_input_lang == 'en-IN' else detected_input_lang}. You MUST respond in that exact same language now. Do not continue in the previous language."
+                            ai_response = await get_ai_response(conversation_history, effective_context + lang_instruction)
                             print(f"AI response: {ai_response}")
 
                             # Name extraction for UNKNOWN callers
@@ -1106,7 +1108,7 @@ async def get_ai_response(conversation_history: list, business_context: str = ""
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_content,
-                    max_output_tokens=150,
+                    max_output_tokens=300,
                 )
             )
         )
