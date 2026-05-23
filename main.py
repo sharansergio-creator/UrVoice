@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion, Increment
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 
 load_dotenv()
@@ -560,7 +560,7 @@ async def save_caller_info(user_id: str, caller_number: str, name: str, call_typ
 
 
 async def update_business_hours_check(user_id: str) -> bool:
-    """Return True if current time falls within any enabled business hour slot, False if closed."""
+    """Return True if current time (IST) falls within any enabled business hour slot, False if closed."""
     try:
         db = get_db()
         doc = db.collection("business_context").document(user_id).get()
@@ -570,7 +570,8 @@ async def update_business_hours_check(user_id: str) -> bool:
         slots = data.get("businessHours", [])
         if not slots:
             return True
-        now = datetime.now()
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(ist)
         day_name = now.strftime("%A")
         current_minutes = now.hour * 60 + now.minute
         for slot in slots:
@@ -578,8 +579,8 @@ async def update_business_hours_check(user_id: str) -> bool:
                 continue
             if slot.get("day", "").lower() != day_name.lower():
                 continue
-            open_time = slot.get("open", "00:00")
-            close_time = slot.get("close", "23:59")
+            open_time = slot.get("openTime", "00:00")
+            close_time = slot.get("closeTime", "23:59")
             try:
                 open_h, open_m = map(int, open_time.split(":"))
                 close_h, close_m = map(int, close_time.split(":"))
@@ -591,6 +592,20 @@ async def update_business_hours_check(user_id: str) -> bool:
     except Exception as e:
         print(f"update_business_hours_check error: {e}")
         return True
+
+
+def _format_business_hours(slots: list) -> str:
+    """Format businessHours array into a human-readable string."""
+    parts = []
+    for slot in slots:
+        if not slot.get("enabled", False):
+            continue
+        day = slot.get("day", "")
+        open_time = slot.get("openTime", "")
+        close_time = slot.get("closeTime", "")
+        if day and open_time and close_time:
+            parts.append(f"{day} {open_time} to {close_time}")
+    return ", ".join(parts) if parts else "our regular business hours"
 
 
 @app.websocket("/audio-stream")
@@ -611,6 +626,8 @@ async def audio_stream(websocket: WebSocket):
     caller_type = "UNKNOWN"
     name_attempts = 0
     is_blocked = False
+    is_after_hours = False
+    hours_string = ""
     name_collected = False
     SILENCE_LIMIT = 15
     RMS_THRESHOLD = 400
@@ -644,9 +661,41 @@ async def audio_stream(websocket: WebSocket):
                 name_collected = caller_name is not None
                 is_blocked = caller_type == "BLOCKED"
 
-                # Select greeting based on caller type
+                # After-hours check
+                is_open = await update_business_hours_check(BUSINESS_USER_ID)
+                if not is_open and not is_blocked:
+                    is_after_hours = True
+                    try:
+                        db_h = get_db()
+                        doc_h = db_h.collection("business_context").document(BUSINESS_USER_ID).get()
+                        if doc_h.exists:
+                            hours_string = _format_business_hours(
+                                doc_h.to_dict().get("businessHours", [])
+                            )
+                    except Exception as e:
+                        print(f"After-hours hours fetch error: {e}")
+                    if not hours_string:
+                        hours_string = "our regular business hours"
+                    print(f"After hours call from {caller_number}")
+
+                # Select greeting based on caller type / after-hours
                 if caller_type == "BLOCKED":
                     greeting = "I'm sorry, this number is not able to reach us. Goodbye."
+                elif is_after_hours:
+                    greeting = (
+                        f"Thank you for calling {biz_name}. We are currently closed. "
+                        f"Our business hours are {hours_string}. Please call back during our working hours, "
+                        f"or leave your name and number and we will call you back."
+                    )
+                    business_context = (
+                        f"You are the AI phone assistant for {biz_name}. "
+                        f"The business is currently closed. Your ONLY job is to: "
+                        f"1. Apologize for being unavailable. "
+                        f"2. Tell the caller the business hours: {hours_string}. "
+                        f"3. Ask for their name and callback number. "
+                        f"4. Thank them and end the call politely. "
+                        f"Do NOT discuss bookings, pricing, or services in detail."
+                    )
                 elif caller_type == "VIP":
                     greeting = f"Hello! Thank you for calling {biz_name}, please hold while we connect you."
                     # TODO: Send FCM notification to owner
@@ -664,7 +713,7 @@ async def audio_stream(websocket: WebSocket):
                     "userId": BUSINESS_USER_ID,
                     "callerNumber": caller_number or "unknown",
                     "callerName": caller_name,
-                    "category": caller_type,
+                    "category": "AFTER_HOURS" if is_after_hours else caller_type,
                     "startTime": SERVER_TIMESTAMP,
                     "status": "active",
                     "exchanges": [],
@@ -716,7 +765,7 @@ async def audio_stream(websocket: WebSocket):
 
                             # Augment system context with name-collection directive for UNKNOWN callers
                             effective_context = business_context
-                            if not name_collected and name_attempts < 2:
+                            if not is_after_hours and not name_collected and name_attempts < 2:
                                 effective_context = business_context + (
                                     "\n\nThe caller has not given their name yet. Your ONLY job right now "
                                     "is to get their name. Ask: 'May I know your name please?' "
@@ -802,11 +851,14 @@ async def audio_stream(websocket: WebSocket):
                 print("Stream stopped")
                 if session_doc_ref:
                     try:
-                        session_doc_ref.update({
+                        update_data = {
                             "status": "completed",
                             "endTime": SERVER_TIMESTAMP,
                             "totalExchanges": len(exchanges),
-                        })
+                        }
+                        if is_after_hours:
+                            update_data["category"] = "AFTER_HOURS"
+                        session_doc_ref.update(update_data)
                         print(f"Session {session_id} completed with {len(exchanges)} exchange(s)")
                     except Exception as e:
                         print(f"Session close error: {e}")
@@ -817,12 +869,15 @@ async def audio_stream(websocket: WebSocket):
     finally:
         if session_doc_ref and session_id:
             try:
-                db = get_db()
-                db.collection("call_sessions").document(session_id).update({
+                update_data = {
                     "status": "completed",
                     "endTime": SERVER_TIMESTAMP,
                     "totalExchanges": len(exchanges)
-                })
+                }
+                if is_after_hours:
+                    update_data["category"] = "AFTER_HOURS"
+                db = get_db()
+                db.collection("call_sessions").document(session_id).update(update_data)
                 print(f"Session {session_id} completed with {len(exchanges)} exchanges")
                 asyncio.create_task(send_fcm_notification(
                     BUSINESS_USER_ID,
