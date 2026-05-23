@@ -1171,8 +1171,13 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
                     # ElevenLabs pcm_16000 returns raw 16-bit PCM at 16000Hz
                     # Resample from 16000Hz to 8000Hz then convert to mulaw
                     pcm_16k = audio_bytes
-                    # Downsample 16000 -> 8000 using audioop
+                    # Ensure even number of bytes for 16-bit samples
+                    if len(pcm_16k) % 2 != 0:
+                        pcm_16k = pcm_16k[:-1]
                     pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
+                    # Ensure even number of bytes after resampling
+                    if len(pcm_8k) % 2 != 0:
+                        pcm_8k = pcm_8k[:-1]
                     mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
                     print(f"ElevenLabs PCM converted: {len(audio_bytes)} -> {len(pcm_8k)} -> {len(mulaw_audio)}")
                 except Exception as conv_err:
