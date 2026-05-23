@@ -35,14 +35,33 @@ if _firebase_creds_json and not firebase_admin._apps:
 def get_db():
     return firestore.client()
 
+async def get_user_id_from_phone(called_number: str) -> str:
+    """Look up which userId owns this Twilio number from Firestore phone_mappings."""
+    try:
+        db = get_db()
+        # Normalize number - try with and without +
+        numbers_to_try = [called_number]
+        if called_number.startswith("+"):
+            numbers_to_try.append(called_number.replace("+", ""))
+        for number in numbers_to_try:
+            doc = db.collection("phone_mappings").document(number).get()
+            if doc.exists:
+                user_id = doc.to_dict().get("userId")
+                if user_id:
+                    print(f"Resolved userId {user_id} for number {number}")
+                    return user_id
+    except Exception as e:
+        print(f"get_user_id_from_phone error: {e}")
+    # Fallback to default user if no mapping found
+    print(f"No phone_mapping found for {called_number}, using fallback")
+    return "MmBTqzNf5OgIOIctQKPiRQezadi1"
+
 async def append_exchange_to_session(doc_ref, exchange: dict):
     """Append one exchange dict to the session document's exchanges array."""
     try:
         doc_ref.update({"exchanges": ArrayUnion([exchange])})
     except Exception as e:
         print(f"Session exchange append error: {e}")
-
-BUSINESS_USER_ID = "MmBTqzNf5OgIOIctQKPiRQezadi1"
 
 async def send_fcm_notification(user_id: str, title: str, body: str, data: dict):
     try:
@@ -196,7 +215,7 @@ Rules:
 class FetchBusinessContextRequest(BaseModel):
     gbp_url: str = ""
     website_url: str = ""
-    user_id: str = BUSINESS_USER_ID
+    user_id: str = "MmBTqzNf5OgIOIctQKPiRQezadi1"
 
 
 _BROWSER_HEADERS = {
@@ -499,14 +518,17 @@ def root():
 async def incoming_call(request: Request):
     form_data = await request.form()
     caller_number = form_data.get("From", "unknown")
+    called_number = form_data.get("To", "unknown")
     call_sid = form_data.get("CallSid", "unknown")
     host = request.headers.get("host")
+    user_id = await get_user_id_from_phone(called_number)
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
         <Stream url="wss://{host}/audio-stream">
             <Parameter name="CallSid" value="{call_sid}"/>
             <Parameter name="From" value="{caller_number}"/>
+            <Parameter name="UserId" value="{user_id}"/>
         </Stream>
     </Connect>
 </Response>"""
@@ -517,15 +539,17 @@ async def incoming_call(request: Request):
 async def call_status(request: Request):
     form_data = await request.form()
     caller_number = form_data.get("From", "unknown")
+    called_number = form_data.get("To", "unknown")
     call_sid = form_data.get("CallSid", "unknown")
     call_status = form_data.get("CallStatus", "unknown")
     print(f"Call status: {call_status}, from: {caller_number}")
-    caller_info = await get_caller_info(BUSINESS_USER_ID, caller_number)
+    business_user_id = await get_user_id_from_phone(called_number)
+    caller_info = await get_caller_info(business_user_id, caller_number)
     caller_name = caller_info.get("name") or caller_number
     caller_type = caller_info.get("type", "UNKNOWN")
     if call_status == "ringing":
         asyncio.create_task(send_fcm_notification(
-            BUSINESS_USER_ID,
+            business_user_id,
             "📞 Incoming Call",
             f"{caller_name} is calling",
             {
@@ -641,6 +665,18 @@ def _format_business_hours(slots: list) -> str:
     return ", ".join(parts) if parts else "our regular business hours"
 
 
+async def get_call_settings(user_id: str) -> dict:
+    """Read call handling settings from Firestore call_settings/{userId}."""
+    try:
+        db = get_db()
+        doc = db.collection("call_settings").document(user_id).get()
+        if doc.exists:
+            return doc.to_dict()
+    except Exception as e:
+        print(f"get_call_settings error: {e}")
+    return {"answerMode": "ALWAYS"}
+
+
 @app.websocket("/audio-stream")
 async def audio_stream(websocket: WebSocket):
     await websocket.accept()
@@ -680,11 +716,25 @@ async def audio_stream(websocket: WebSocket):
                     data["start"].get("From") or
                     "unknown"
                 )
+                business_user_id = (
+                    data["start"].get("customParameters", {}).get("UserId") or
+                    "MmBTqzNf5OgIOIctQKPiRQezadi1"
+                )
+                print(f"Business userId for this call: {business_user_id}")
                 print(f"Stream start data: {json.dumps(data['start'], indent=2)}")
                 print(f"Stream started: {stream_sid}, caller: {caller_number}")
                 # Fetch business context once per call
-                business_context = await fetch_business_context(BUSINESS_USER_ID)
+                business_context = await fetch_business_context(business_user_id)
                 print(f"Business context loaded: {bool(business_context)}")
+
+                call_settings = await get_call_settings(business_user_id)
+                answer_mode = call_settings.get("answerMode", "ALWAYS")
+                print(f"Answer mode: {answer_mode}")
+
+                if answer_mode == "NEVER":
+                    sorry = "Sorry, we are not available to take calls right now. Please try again later."
+                    await send_audio_response(websocket, stream_sid, sorry)
+                    return
 
                 # Extract business name from context for use in greetings
                 biz_name = "our business"
@@ -695,19 +745,19 @@ async def audio_stream(websocket: WebSocket):
                     biz_name = (raw_name[:comma_idx] if comma_idx != -1 else raw_name).strip().rstrip(".")
 
                 # Identify caller from contact_permissions
-                caller_info = await get_caller_info(BUSINESS_USER_ID, caller_number)
+                caller_info = await get_caller_info(business_user_id, caller_number)
                 caller_name = caller_info["name"]
                 caller_type = caller_info["type"]
                 name_collected = caller_name is not None
                 is_blocked = caller_type == "BLOCKED"
 
                 # After-hours check
-                is_open = await update_business_hours_check(BUSINESS_USER_ID)
+                is_open = await update_business_hours_check(business_user_id)
                 if not is_open and not is_blocked:
                     is_after_hours = True
                     try:
                         db_h = get_db()
-                        doc_h = db_h.collection("business_context").document(BUSINESS_USER_ID).get()
+                        doc_h = db_h.collection("business_context").document(business_user_id).get()
                         if doc_h.exists:
                             hours_string = _format_business_hours(
                                 doc_h.to_dict().get("businessHours", [])
@@ -750,7 +800,7 @@ async def audio_stream(websocket: WebSocket):
                 session_doc_ref = db.collection("call_sessions").document(session_id)
                 session_doc_ref.set({
                     "sessionId": session_id,
-                    "userId": BUSINESS_USER_ID,
+                    "userId": business_user_id,
                     "callerNumber": caller_number or "unknown",
                     "callerName": caller_name,
                     "category": "AFTER_HOURS" if is_after_hours else caller_type,
@@ -761,7 +811,7 @@ async def audio_stream(websocket: WebSocket):
                 print(f"Session created: {session_id}")
 
                 asyncio.create_task(send_fcm_notification(
-                    BUSINESS_USER_ID,
+                    business_user_id,
                     "📞 Incoming Call",
                     f"{caller_name or 'Unknown Caller'} is calling",
                     {"sessionId": session_id, "callerName": caller_name or "", "type": "CALL_STARTED"}
@@ -803,7 +853,9 @@ async def audio_stream(websocket: WebSocket):
 
                         raw_mulaw = b"".join(base64.b64decode(c) for c in chunks_to_process)
                         wav_bytes = mulaw_to_wav(raw_mulaw)
-                        transcript = await transcribe(wav_bytes)
+                        # Use language from last AI response as hint for next STT call
+                        last_lang = exchanges[-1]["language"] if exchanges else "en-IN"
+                        transcript = await transcribe(wav_bytes, language_hint=last_lang)
                         print(f"Caller said: {transcript}")
 
                         if transcript and transcript.strip():
@@ -848,7 +900,7 @@ async def audio_stream(websocket: WebSocket):
                                         name_collected = True
                                         caller_type = "CUSTOMER"
                                         asyncio.create_task(
-                                            save_caller_info(BUSINESS_USER_ID, caller_number, caller_name, "CUSTOMER")
+                                            save_caller_info(business_user_id, caller_number, caller_name, "CUSTOMER")
                                         )
                                         if session_doc_ref:
                                             try:
@@ -863,7 +915,7 @@ async def audio_stream(websocket: WebSocket):
                                     name_attempts += 1
                                     if name_attempts >= 2:
                                         asyncio.create_task(
-                                            save_caller_info(BUSINESS_USER_ID, caller_number, "Unknown", "SPAM")
+                                            save_caller_info(business_user_id, caller_number, "Unknown", "SPAM")
                                         )
                                         if session_doc_ref:
                                             try:
@@ -934,7 +986,7 @@ async def audio_stream(websocket: WebSocket):
                 db.collection("call_sessions").document(session_id).update(update_data)
                 print(f"Session {session_id} completed with {len(exchanges)} exchanges")
                 asyncio.create_task(send_fcm_notification(
-                    BUSINESS_USER_ID,
+                    business_user_id,
                     "📋 Call Completed",
                     f"Call ended - {len(exchanges)} exchanges",
                     {"sessionId": session_id, "type": "CALL_ENDED"}
@@ -1080,14 +1132,14 @@ def mulaw_chunk_to_pcm(mulaw_bytes: bytes) -> bytes:
     sample = np.where(sign != 0, 0x84 - sample, sample - 0x84)
     return sample.astype(np.int16).tobytes()
 
-async def transcribe(audio_bytes: bytes) -> str:
+async def transcribe(audio_bytes: bytes, language_hint: str = "en-IN") -> str:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 "https://api.sarvam.ai/speech-to-text",
                 headers={"api-subscription-key": SARVAM_API_KEY},
                 files={"file": ("audio.wav", audio_bytes, "audio/wav")},
-                data={"language_code": "en-IN", "model": "saarika:v2.5"},
+                data={"language_code": language_hint, "model": "saarika:v2.5"},
                 timeout=30
             )
             result = response.json()
