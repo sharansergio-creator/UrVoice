@@ -25,6 +25,8 @@ app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 # Initialize Firebase Admin SDK
 _firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
@@ -508,6 +510,80 @@ async def fetch_business_context_endpoint(body: FetchBusinessContextRequest):
         print(f"Firestore save error: {e}")
 
     return result
+
+
+class ProvisionNumberRequest(BaseModel):
+    user_id: str
+    country_code: str = "US"
+
+@app.post("/provision-number")
+async def provision_number(body: ProvisionNumberRequest):
+    """
+    Buy a new Twilio phone number, set its webhook to this backend,
+    and register the mapping in Firestore phone_mappings.
+    """
+    try:
+        # Search for available numbers
+        search_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/AvailablePhoneNumbers/{body.country_code}/Local.json"
+        async with httpx.AsyncClient() as client:
+            search_resp = await client.get(
+                search_url,
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                params={"VoiceEnabled": "true", "Limit": 1}
+            )
+            if search_resp.status_code != 200:
+                return {"error": f"Number search failed: {search_resp.text}"}
+
+            numbers = search_resp.json().get("available_phone_numbers", [])
+            if not numbers:
+                return {"error": "No available numbers found"}
+
+            phone_number = numbers[0]["phone_number"]
+            print(f"Found available number: {phone_number}")
+
+            # Purchase the number and set webhook
+            purchase_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers.json"
+            purchase_resp = await client.post(
+                purchase_url,
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                data={
+                    "PhoneNumber": phone_number,
+                    "VoiceUrl": "https://urvoice-production.up.railway.app/incoming-call",
+                    "VoiceMethod": "POST",
+                    "StatusCallback": "https://urvoice-production.up.railway.app/call-status",
+                    "StatusCallbackMethod": "POST",
+                }
+            )
+            if purchase_resp.status_code not in (200, 201):
+                return {"error": f"Number purchase failed: {purchase_resp.text}"}
+
+            purchased = purchase_resp.json()
+            assigned_number = purchased.get("phone_number")
+            print(f"Purchased number: {assigned_number}")
+
+            # Save to Firestore phone_mappings
+            db = get_db()
+            db.collection("phone_mappings").document(assigned_number).set({
+                "userId": body.user_id,
+                "assignedAt": SERVER_TIMESTAMP,
+                "country": body.country_code
+            })
+            print(f"Saved phone_mapping: {assigned_number} -> {body.user_id}")
+
+            # Also save the number to users/{userId}
+            db.collection("users").document(body.user_id).update({
+                "twilioNumber": assigned_number
+            })
+
+            return {
+                "success": True,
+                "phoneNumber": assigned_number,
+                "userId": body.user_id
+            }
+
+    except Exception as e:
+        print(f"provision_number error: {e}")
+        return {"error": str(e)}
 
 
 @app.get("/")
