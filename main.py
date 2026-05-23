@@ -1167,13 +1167,10 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
             voice_id = await get_elevenlabs_voice_id(user_id) if user_id else None
             if user_id and voice_id:
                 try:
-                    from pydub import AudioSegment
+                    import miniaudio
                     import io as _io
-                    # Decode MP3 from ElevenLabs
-                    mp3_segment = AudioSegment.from_mp3(_io.BytesIO(audio_bytes))
-                    # Resample to 8000Hz mono 16-bit
-                    mp3_segment = mp3_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
-                    pcm_bytes = mp3_segment.raw_data
+                    decoded = miniaudio.decode(audio_bytes, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=8000)
+                    pcm_bytes = bytes(decoded.samples)
                     mulaw_audio = pcm_to_mulaw(pcm_bytes)
                     print(f"ElevenLabs converted: {len(audio_bytes)} MP3 -> {len(pcm_bytes)} PCM -> {len(mulaw_audio)} mulaw")
                 except Exception as conv_err:

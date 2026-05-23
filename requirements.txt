@@ -10,5 +10,4 @@ firebase-admin
 beautifulsoup4
 lxml
 google-genai
-pydub
-pyaudioop
+miniaudio
