@@ -3,7 +3,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from twilio.twiml.voice_response import VoiceResponse, Connect
 import os
-import google.generativeai as genai
+from google import genai
 import json
 import base64
 import httpx
@@ -26,7 +26,6 @@ app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
 
 # Initialize Firebase Admin SDK
 _firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
@@ -295,18 +294,22 @@ async def _scrape_gbp(gbp_url: str) -> dict:
 
     if GEMINI_API_KEY:
         try:
-            gbp_model = genai.GenerativeModel(
-                model_name="gemini-2.0-flash",
-                system_instruction=(
-                    "Extract business information from this Google Maps/Business Profile page text. "
-                    "Return ONLY a JSON object with these keys: "
-                    "businessName, address, phone, hours, rating, category. "
-                    "Use empty string for fields not found. No markdown, just JSON."
-                )
-            )
+            gbp_client = genai.Client(api_key=GEMINI_API_KEY)
             gbp_response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: gbp_model.generate_content(f"Extract:\n\n{text[:5000]}")
+                lambda: gbp_client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[{"role": "user", "parts": [{"text": f"Extract:\n\n{text[:5000]}"}]}],
+                    config=genai.types.GenerateContentConfig(
+                        system_instruction=(
+                            "Extract business information from this Google Maps/Business Profile page text. "
+                            "Return ONLY a JSON object with these keys: "
+                            "businessName, address, phone, hours, rating, category. "
+                            "Use empty string for fields not found. No markdown, just JSON."
+                        ),
+                        max_output_tokens=400,
+                    )
+                )
             )
             parsed = _parse_llm_json(gbp_response.text.strip())
             for key in result:
@@ -354,21 +357,25 @@ async def _gemini_extract(text: str, include_address: bool = False) -> dict:
         return extracted
     trimmed = text[:5000]
     try:
-        extract_model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=(
-                "You extract business information from website/page text. "
-                f"Return ONLY a JSON object with these keys: {keys}. "
-                "For 'about': 2-3 sentences about what the business does. "
-                "For 'services': comma-separated list of services or products. "
-                "For 'pricing': all price info found (packages, rates, tariffs). "
-                "For 'address': full physical address if found. "
-                "Use empty string for fields not found. No markdown, just JSON."
-            )
-        )
+        extract_client = genai.Client(api_key=GEMINI_API_KEY)
         response = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: extract_model.generate_content(f"Extract business info:\n\n{trimmed}")
+            lambda: extract_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[{"role": "user", "parts": [{"text": f"Extract business info:\n\n{trimmed}"}]}],
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=(
+                        "You extract business information from website/page text. "
+                        f"Return ONLY a JSON object with these keys: {keys}. "
+                        "For 'about': 2-3 sentences about what the business does. "
+                        "For 'services': comma-separated list of services or products. "
+                        "For 'pricing': all price info found (packages, rates, tariffs). "
+                        "For 'address': full physical address if found. "
+                        "Use empty string for fields not found. No markdown, just JSON."
+                    ),
+                    max_output_tokens=600,
+                )
+            )
         )
         parsed = _parse_llm_json(response.text.strip())
         for key in extracted:
@@ -986,31 +993,27 @@ async def get_ai_response(conversation_history: list, business_context: str = ""
             "You are UrVoice, an AI phone assistant for Indian users. "
             "Keep responses short, under 2 sentences. Be helpful and professional. "
             "Always respond in the same language the caller is using. "
-            "If the caller speaks Kanglish, Hinglish, or Tanglish, respond in the same mix. "
             "Never ignore a language switch request."
         )
 
-        model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=system_content
-        )
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
         # Convert conversation history to Gemini format
-        gemini_history = []
-        for msg in conversation_history[:-1]:  # all except last
+        contents = []
+        for msg in conversation_history:
             role = "user" if msg["role"] == "user" else "model"
-            gemini_history.append({
-                "role": role,
-                "parts": [msg["content"]]
-            })
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
-        chat = model.start_chat(history=gemini_history)
-
-        # Send last message
-        last_message = conversation_history[-1]["content"]
         response = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: chat.send_message(last_message)
+            lambda: client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=contents,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=system_content,
+                    max_output_tokens=150,
+                )
+            )
         )
 
         return response.text

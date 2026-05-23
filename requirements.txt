@@ -9,4 +9,4 @@ cartesia
 firebase-admin
 beautifulsoup4
 lxml
-google-generativeai
+google-genai
