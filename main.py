@@ -3,6 +3,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from twilio.twiml.voice_response import VoiceResponse, Connect
 import os
+import google.generativeai as genai
 import json
 import base64
 import httpx
@@ -24,7 +25,8 @@ load_dotenv()
 app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Initialize Firebase Admin SDK
 _firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
@@ -291,37 +293,27 @@ async def _scrape_gbp(gbp_url: str) -> dict:
     if not text.strip():
         return result  # return with name only
 
-    if GROQ_API_KEY:
+    if GEMINI_API_KEY:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                    json={
-                        "model": "llama-3.3-70b-versatile",
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "Extract business information from this Google Maps/Business Profile page text. "
-                                    "Return ONLY a JSON object with these keys: "
-                                    "businessName, address, phone, hours, rating, category. "
-                                    "Use empty string for fields not found. No markdown, just JSON."
-                                ),
-                            },
-                            {"role": "user", "content": f"Extract:\n\n{text[:5000]}"},
-                        ],
-                        "max_tokens": 400,
-                        "temperature": 0.1,
-                    },
+            gbp_model = genai.GenerativeModel(
+                model_name="gemini-2.0-flash",
+                system_instruction=(
+                    "Extract business information from this Google Maps/Business Profile page text. "
+                    "Return ONLY a JSON object with these keys: "
+                    "businessName, address, phone, hours, rating, category. "
+                    "Use empty string for fields not found. No markdown, just JSON."
                 )
-            data = resp.json()
-            parsed = _parse_llm_json(data["choices"][0]["message"]["content"].strip())
+            )
+            gbp_response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: gbp_model.generate_content(f"Extract:\n\n{text[:5000]}")
+            )
+            parsed = _parse_llm_json(gbp_response.text.strip())
             for key in result:
                 if parsed.get(key):
                     result[key] = str(parsed[key])[:300]
         except Exception as e:
-            print(f"GBP Groq extract error: {e}")
+            print(f"GBP Gemini extract error: {e}")
 
     if not result["businessName"]:
         result["businessName"] = _name_from_gbp_url(gbp_url)
@@ -354,57 +346,45 @@ def _name_from_gbp_url(url: str) -> str:
     return ""
 
 
-async def _groq_extract(text: str, include_address: bool = False) -> dict:
-    """Use llama-3.3-70b-versatile to extract business fields from raw text."""
+async def _gemini_extract(text: str, include_address: bool = False) -> dict:
+    """Use gemini-2.0-flash to extract business fields from raw text."""
     keys = "about, services, pricing" + (", address, phone" if include_address else "")
     extracted = {"about": "", "services": "", "pricing": "", "address": "", "phone": ""}
-    if not GROQ_API_KEY or not text.strip():
+    if not GEMINI_API_KEY or not text.strip():
         return extracted
     trimmed = text[:5000]
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "You extract business information from website/page text. "
-                                f"Return ONLY a JSON object with these keys: {keys}. "
-                                "For 'about': 2-3 sentences about what the business does. "
-                                "For 'services': comma-separated list of services or products. "
-                                "For 'pricing': all price info found (packages, rates, tariffs). "
-                                "For 'address': full physical address if found. "
-                                "Use empty string for fields not found. No markdown, just JSON."
-                            ),
-                        },
-                        {"role": "user", "content": f"Extract business info:\n\n{trimmed}"},
-                    ],
-                    "max_tokens": 600,
-                    "temperature": 0.1,
-                },
+        extract_model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            system_instruction=(
+                "You extract business information from website/page text. "
+                f"Return ONLY a JSON object with these keys: {keys}. "
+                "For 'about': 2-3 sentences about what the business does. "
+                "For 'services': comma-separated list of services or products. "
+                "For 'pricing': all price info found (packages, rates, tariffs). "
+                "For 'address': full physical address if found. "
+                "Use empty string for fields not found. No markdown, just JSON."
             )
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"].strip()
-        parsed = _parse_llm_json(content)
+        )
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: extract_model.generate_content(f"Extract business info:\n\n{trimmed}")
+        )
+        parsed = _parse_llm_json(response.text.strip())
         for key in extracted:
             if parsed.get(key):
                 extracted[key] = str(parsed[key])[:600]
-        print(f"Groq extract keys found: {[k for k, v in extracted.items() if v]}")
+        print(f"Gemini extract keys found: {[k for k, v in extracted.items() if v]}")
     except Exception as e:
-        print(f"Groq extract error: {e}")
+        print(f"Gemini extract error: {e}")
     return extracted
 
 
-# Keep alias for compatibility
-_extract_with_groq = _groq_extract
+
 
 
 async def _scrape_website(website_url: str) -> dict:
-    """Extract business info from a website via Jina Reader (+ httpx fallback) + Groq."""
+    """Extract business info from a website via Jina Reader (+ httpx fallback) + Gemini."""
     result = {"about": "", "services": "", "pricing": "", "address": "", "contact": "", "faqs": ""}
 
     base = website_url.rstrip("/")
@@ -424,12 +404,12 @@ async def _scrape_website(website_url: str) -> dict:
 
     combined = "\n\n---\n\n".join(pages)[:8000]
 
-    # Single Groq call to extract all fields
-    groq_data = await _groq_extract(combined, include_address=True)
-    result["about"]    = groq_data.get("about", "")
-    result["services"] = groq_data.get("services", "")
-    result["pricing"]  = groq_data.get("pricing", "")
-    result["address"]  = groq_data.get("address", "")
+    # Single Gemini call to extract all fields
+    gemini_data = await _gemini_extract(combined, include_address=True)
+    result["about"]    = gemini_data.get("about", "")
+    result["services"] = gemini_data.get("services", "")
+    result["pricing"]  = gemini_data.get("pricing", "")
+    result["address"]  = gemini_data.get("address", "")
 
     # Regex for phone/email (reliable in clean text)
     phones = re.findall(r"(\+?\d[\d\s\-().]{7,}\d)", combined)
@@ -1002,36 +982,38 @@ async def transcribe(audio_bytes: bytes) -> str:
 
 async def get_ai_response(conversation_history: list, business_context: str = "") -> str:
     try:
-        async with httpx.AsyncClient() as client:
-            if business_context:
-                system_content = business_context
-            else:
-                system_content = (
-                    "You are UrVoice, an AI phone assistant for Indian users. "
-                    "Keep responses short, under 2 sentences. Be helpful and professional. "
-                    "IMPORTANT: Always respond in the same language the caller is using. "
-                    "If the caller speaks Kanglish, Hinglish, or Tanglish, respond in the same mix. "
-                    "Never ignore a language switch request."
-                )
-            messages = [
-                {"role": "system", "content": system_content}
-            ] + conversation_history
+        system_content = business_context if business_context else (
+            "You are UrVoice, an AI phone assistant for Indian users. "
+            "Keep responses short, under 2 sentences. Be helpful and professional. "
+            "Always respond in the same language the caller is using. "
+            "If the caller speaks Kanglish, Hinglish, or Tanglish, respond in the same mix. "
+            "Never ignore a language switch request."
+        )
 
-            response = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": messages,
-                    "max_tokens": 150
-                },
-                timeout=30
-            )
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
+        model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            system_instruction=system_content
+        )
+
+        # Convert conversation history to Gemini format
+        gemini_history = []
+        for msg in conversation_history[:-1]:  # all except last
+            role = "user" if msg["role"] == "user" else "model"
+            gemini_history.append({
+                "role": role,
+                "parts": [msg["content"]]
+            })
+
+        chat = model.start_chat(history=gemini_history)
+
+        # Send last message
+        last_message = conversation_history[-1]["content"]
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: chat.send_message(last_message)
+        )
+
+        return response.text
     except Exception as e:
-        print(f"Groq error: {e}")
+        print(f"Gemini error: {e}")
         return ""
