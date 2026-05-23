@@ -1028,7 +1028,13 @@ async def audio_stream(websocket: WebSocket):
                         transcript = await transcribe(wav_bytes, language_hint=last_lang)
                         print(f"Caller said: {transcript}")
 
-                        if transcript and transcript.strip() and len(transcript.strip()) > 2:
+                        # Filter out STT hallucinations - gibberish short responses
+                        transcript_clean = transcript.strip() if transcript else ""
+                        word_count = len(transcript_clean.split())
+                        is_likely_hallucination = (
+                            word_count == 1 and len(transcript_clean) <= 4
+                        )
+                        if transcript_clean and len(transcript_clean) > 2 and not is_likely_hallucination:
                             conversation_history.append({"role": "user", "content": transcript})
 
                             # Augment system context with name-collection directive for UNKNOWN callers
