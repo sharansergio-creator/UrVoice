@@ -516,6 +516,7 @@ async def incoming_call(request: Request):
         <Connect>
             <Stream url="wss://{host}/audio-stream">
                 <Parameter name="CallSid" value="{call_sid}"/>
+                <Parameter name="CallFrom" value="{caller_number}"/>
                 <Parameter name="From" value="{caller_number}"/>
             </Stream>
         </Connect>
@@ -691,8 +692,15 @@ async def audio_stream(websocket: WebSocket):
 
             if data["event"] == "start":
                 stream_sid = data["start"]["streamSid"]
-                caller_number = data["start"].get("customParameters", {}).get("from") or \
-                                data["start"].get("from") or "unknown"
+                caller_number = (
+                    data["start"].get("customParameters", {}).get("From") or
+                    data["start"].get("customParameters", {}).get("from") or
+                    data["start"].get("customParameters", {}).get("CallFrom") or
+                    data["start"].get("from") or
+                    data["start"].get("From") or
+                    "unknown"
+                )
+                print(f"Stream start data: {json.dumps(data['start'], indent=2)}")
                 print(f"Stream started: {stream_sid}, caller: {caller_number}")
                 # Fetch business context once per call
                 business_context = await fetch_business_context(BUSINESS_USER_ID)
