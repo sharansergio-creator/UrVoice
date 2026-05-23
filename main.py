@@ -1161,7 +1161,14 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
     try:
         audio_bytes = await text_to_speech(text, user_id)
         if audio_bytes:
-            mulaw_audio = pcm_to_mulaw(audio_bytes)
+            # Check if audio is already mulaw (from ElevenLabs ulaw_8000) or PCM (from Sarvam)
+            # ElevenLabs ulaw_8000 returns raw mulaw directly — no conversion needed
+            # Sarvam returns PCM — needs conversion
+            voice_id = await get_elevenlabs_voice_id(user_id) if user_id else None
+            if user_id and voice_id:
+                mulaw_audio = audio_bytes  # already mulaw from ElevenLabs
+            else:
+                mulaw_audio = pcm_to_mulaw(audio_bytes)  # convert PCM from Sarvam
             payload = base64.b64encode(mulaw_audio).decode("utf-8")
             message = {
                 "event": "media",
@@ -1269,7 +1276,7 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 json={
                     "text": text,
                     "model_id": "eleven_flash_v2_5",
-                    "output_format": "pcm_8000",
+                    "output_format": "ulaw_8000",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
