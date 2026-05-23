@@ -1167,19 +1167,11 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
             voice_id = await get_elevenlabs_voice_id(user_id) if user_id else None
             if user_id and voice_id:
                 try:
-                    import audioop
-                    # ElevenLabs pcm_16000 returns raw 16-bit PCM at 16000Hz
-                    # Resample from 16000Hz to 8000Hz then convert to mulaw
-                    pcm_16k = audio_bytes
-                    # Ensure even number of bytes for 16-bit samples
-                    if len(pcm_16k) % 2 != 0:
-                        pcm_16k = pcm_16k[:-1]
-                    pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
-                    # Ensure even number of bytes after resampling
-                    if len(pcm_8k) % 2 != 0:
-                        pcm_8k = pcm_8k[:-1]
-                    mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
-                    print(f"ElevenLabs PCM converted: {len(audio_bytes)} -> {len(pcm_8k)} -> {len(mulaw_audio)}")
+                    # eleven_turbo_v2_5 with ulaw_8000 returns raw mulaw — send directly
+                    mulaw_audio = audio_bytes
+                    if len(mulaw_audio) % 2 != 0:
+                        mulaw_audio = mulaw_audio[:-1]
+                    print(f"ElevenLabs ulaw direct: {len(mulaw_audio)} bytes, first 4: {audio_bytes[:4].hex()}")
                 except Exception as conv_err:
                     print(f"ElevenLabs conversion error: {conv_err}")
                     fallback = await sarvam_tts(text, "en-IN")
@@ -1292,8 +1284,8 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 },
                 json={
                     "text": text,
-                    "model_id": "eleven_flash_v2_5",
-                    "output_format": "pcm_16000",
+                    "model_id": "eleven_turbo_v2_5",
+                    "output_format": "ulaw_8000",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
