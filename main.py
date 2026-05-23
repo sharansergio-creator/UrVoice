@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import os
@@ -27,6 +27,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
 # Initialize Firebase Admin SDK
 _firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
@@ -586,6 +587,92 @@ async def provision_number(body: ProvisionNumberRequest):
         return {"error": str(e)}
 
 
+async def get_elevenlabs_voice_id(user_id: str) -> str | None:
+    """Check if user has a cloned ElevenLabs voice ID in Firestore."""
+    try:
+        db = get_db()
+        doc = db.collection("users").document(user_id).get()
+        if doc.exists:
+            return doc.to_dict().get("elevenLabsVoiceId")
+    except Exception as e:
+        print(f"get_elevenlabs_voice_id error: {e}")
+    return None
+
+
+@app.post("/clone-voice")
+async def clone_voice(
+    user_id: str = Form(...),
+    audio: UploadFile = File(...)
+):
+    """
+    Receive audio sample from Android app,
+    send to ElevenLabs to create a voice clone,
+    save the voice_id to Firestore users/{userId}.
+    """
+    try:
+        audio_bytes = await audio.read()
+        print(f"Received audio for cloning: {len(audio_bytes)} bytes for user {user_id}")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.elevenlabs.io/v1/voices/add",
+                headers={"xi-api-key": ELEVENLABS_API_KEY},
+                files={"files": (audio.filename or "voice_sample.m4a", audio_bytes, "audio/m4a")},
+                data={
+                    "name": f"UrVoice_{user_id[:8]}",
+                    "description": "Voice clone for UrVoice AI assistant"
+                },
+                timeout=60
+            )
+
+            if response.status_code != 200:
+                print(f"ElevenLabs clone error: {response.status_code} {response.text}")
+                return {"error": f"Voice cloning failed: {response.text}"}
+
+            result = response.json()
+            voice_id = result.get("voice_id")
+            print(f"Voice cloned successfully: {voice_id} for user {user_id}")
+
+            # Save voice_id to Firestore
+            db = get_db()
+            db.collection("users").document(user_id).update({
+                "elevenLabsVoiceId": voice_id
+            })
+
+            return {"success": True, "voiceId": voice_id}
+
+    except Exception as e:
+        print(f"clone_voice error: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/delete-voice")
+async def delete_voice(request: Request):
+    """Remove ElevenLabs voice clone and clear from Firestore."""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        voice_id = body.get("voice_id")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(
+                f"https://api.elevenlabs.io/v1/voices/{voice_id}",
+                headers={"xi-api-key": ELEVENLABS_API_KEY},
+                timeout=30
+            )
+            print(f"ElevenLabs delete response: {response.status_code}")
+
+        db = get_db()
+        db.collection("users").document(user_id).update({
+            "elevenLabsVoiceId": None
+        })
+
+        return {"success": True}
+    except Exception as e:
+        print(f"delete_voice error: {e}")
+        return {"error": str(e)}
+
+
 @app.get("/")
 def root():
     return {"status": "UrVoice backend running"}
@@ -809,7 +896,7 @@ async def audio_stream(websocket: WebSocket):
 
                 if answer_mode == "NEVER":
                     sorry = "Sorry, we are not available to take calls right now. Please try again later."
-                    await send_audio_response(websocket, stream_sid, sorry)
+                    await send_audio_response(websocket, stream_sid, sorry, business_user_id)
                     return
 
                 # Extract business name from context for use in greetings
@@ -894,7 +981,7 @@ async def audio_stream(websocket: WebSocket):
                 ))
 
                 is_playing = True
-                await send_audio_response(websocket, stream_sid, greeting)
+                await send_audio_response(websocket, stream_sid, greeting, business_user_id)
                 is_playing = False
                 audio_chunks.clear()
                 speaking = False
@@ -1001,7 +1088,7 @@ async def audio_stream(websocket: WebSocket):
                                         print(f"Caller {caller_number} logged as SPAM after {name_attempts} name attempts")
                                         sorry_msg = "I'm sorry I couldn't get your name, please call back when ready. Goodbye."
                                         is_playing = True
-                                        await send_audio_response(websocket, stream_sid, sorry_msg)
+                                        await send_audio_response(websocket, stream_sid, sorry_msg, business_user_id)
                                         is_playing = False
                                         audio_chunks.clear()
                                         speaking = False
@@ -1011,7 +1098,7 @@ async def audio_stream(websocket: WebSocket):
                             if ai_response and stream_sid:
                                 conversation_history.append({"role": "assistant", "content": ai_response})
                                 is_playing = True
-                                await send_audio_response(websocket, stream_sid, ai_response)
+                                await send_audio_response(websocket, stream_sid, ai_response, business_user_id)
                                 is_playing = False
                                 audio_chunks.clear()
                                 speaking = False
@@ -1070,9 +1157,9 @@ async def audio_stream(websocket: WebSocket):
             except Exception as fe:
                 print(f"Session finalize error: {fe}")
 
-async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str):
+async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, user_id: str = None):
     try:
-        audio_bytes = await text_to_speech(text)
+        audio_bytes = await text_to_speech(text, user_id)
         if audio_bytes:
             mulaw_audio = pcm_to_mulaw(audio_bytes)
             payload = base64.b64encode(mulaw_audio).decode("utf-8")
@@ -1119,8 +1206,18 @@ def detect_language(text: str) -> str:
         return "te-IN"
     return "en-IN"
 
-async def text_to_speech(text: str) -> bytes:
+async def text_to_speech(text: str, user_id: str = None) -> bytes:
     language = detect_language(text)
+
+    # Check if user has ElevenLabs voice clone
+    if user_id and ELEVENLABS_API_KEY:
+        voice_id = await get_elevenlabs_voice_id(user_id)
+        if voice_id:
+            elevenlabs_audio = await elevenlabs_tts(text, voice_id)
+            if elevenlabs_audio:
+                return elevenlabs_audio
+
+    # Fall back to Sarvam
     return await sarvam_tts(text, language)
 
 async def sarvam_tts(text: str, language_code: str) -> bytes:
@@ -1157,6 +1254,39 @@ async def sarvam_tts(text: str, language_code: str) -> bytes:
                 return None
     except Exception as e:
         print(f"Sarvam TTS error: {e}")
+        return None
+
+async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
+    """Generate speech using ElevenLabs with user's cloned voice."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_flash_v2_5",
+                    "output_format": "pcm_8000",
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.75,
+                        "style": 0.0,
+                        "use_speaker_boost": True
+                    }
+                },
+                timeout=30
+            )
+            if response.status_code == 200:
+                print(f"ElevenLabs TTS success for voice {voice_id}")
+                return response.content
+            else:
+                print(f"ElevenLabs TTS error: {response.status_code} {response.text}")
+                return None
+    except Exception as e:
+        print(f"ElevenLabs TTS error: {e}")
         return None
 
 def pcm_to_mulaw(pcm_bytes: bytes) -> bytes:
