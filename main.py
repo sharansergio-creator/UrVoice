@@ -861,8 +861,8 @@ async def audio_stream(websocket: WebSocket):
     is_after_hours = False
     hours_string = ""
     name_collected = False
-    SILENCE_LIMIT = 15
-    RMS_THRESHOLD = 400
+    SILENCE_LIMIT = 20
+    RMS_THRESHOLD = 500
 
     try:
         while True:
@@ -1018,10 +1018,17 @@ async def audio_stream(websocket: WebSocket):
                         wav_bytes = mulaw_to_wav(raw_mulaw)
                         # Use language from last AI response as hint for next STT call
                         last_lang = exchanges[-1]["language"] if exchanges else "en-IN"
+                        # Skip very short audio - likely silence or noise
+                        duration_seconds = len(raw_mulaw) / 8000
+                        if duration_seconds < 0.8:
+                            print(f"Audio too short ({duration_seconds:.2f}s), skipping STT")
+                            audio_chunks.clear()
+                            continue
+
                         transcript = await transcribe(wav_bytes, language_hint=last_lang)
                         print(f"Caller said: {transcript}")
 
-                        if transcript and transcript.strip():
+                        if transcript and transcript.strip() and len(transcript.strip()) > 2:
                             conversation_history.append({"role": "user", "content": transcript})
 
                             # Augment system context with name-collection directive for UNKNOWN callers
