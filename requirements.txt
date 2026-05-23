@@ -11,3 +11,4 @@ beautifulsoup4
 lxml
 google-genai
 pydub
+pyaudioop
