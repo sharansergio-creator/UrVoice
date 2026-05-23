@@ -1167,16 +1167,18 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
             voice_id = await get_elevenlabs_voice_id(user_id) if user_id else None
             if user_id and voice_id:
                 try:
-                    import miniaudio
-                    import io as _io
-                    decoded = miniaudio.decode(audio_bytes, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=8000)
-                    pcm_bytes = bytes(decoded.samples)
-                    mulaw_audio = pcm_to_mulaw(pcm_bytes)
-                    print(f"ElevenLabs converted: {len(audio_bytes)} MP3 -> {len(pcm_bytes)} PCM -> {len(mulaw_audio)} mulaw")
+                    import audioop
+                    # ElevenLabs pcm_16000 returns raw 16-bit PCM at 16000Hz
+                    # Resample from 16000Hz to 8000Hz then convert to mulaw
+                    pcm_16k = audio_bytes
+                    # Downsample 16000 -> 8000 using audioop
+                    pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
+                    mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
+                    print(f"ElevenLabs PCM converted: {len(audio_bytes)} -> {len(pcm_8k)} -> {len(mulaw_audio)}")
                 except Exception as conv_err:
                     print(f"ElevenLabs conversion error: {conv_err}")
                     fallback = await sarvam_tts(text, "en-IN")
-                    mulaw_audio = pcm_to_mulaw(fallback) if fallback else b""
+                    mulaw_audio = audioop.lin2ulaw(fallback, 2) if fallback else b""
             else:
                 mulaw_audio = pcm_to_mulaw(audio_bytes)  # convert PCM from Sarvam
             payload = base64.b64encode(mulaw_audio).decode("utf-8")
@@ -1286,7 +1288,7 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 json={
                     "text": text,
                     "model_id": "eleven_flash_v2_5",
-                    "output_format": "mp3_22050_32",
+                    "output_format": "pcm_16000",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
@@ -1307,35 +1309,12 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
         return None
 
 def pcm_to_mulaw(pcm_bytes: bytes) -> bytes:
-    MULAW_MAX = 0x1FFF
-    MULAW_BIAS = 33
-
-    samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
-    sign = np.where(samples < 0, 0x80, 0x00)
-    samples = np.abs(samples)
-    samples = np.clip(samples, 0, 32767)
-    samples = samples + MULAW_BIAS
-    samples = np.clip(samples, 0, MULAW_MAX)
-
-    exp = np.zeros(len(samples), dtype=np.int32)
-    for i in range(7, -1, -1):
-        mask = samples >= (1 << (i + 5))
-        exp = np.where(mask & (exp == 0), i, exp)
-
-    mantissa = (samples >> (exp + 1)) & 0x0F
-    mulaw = ~(sign | (exp << 4) | mantissa)
-    return (mulaw & 0xFF).astype(np.uint8).tobytes()
+    import audioop
+    return audioop.lin2ulaw(pcm_bytes, 2)
 
 def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
-    mulaw_array = np.frombuffer(mulaw_bytes, dtype=np.uint8)
-    mulaw_array = mulaw_array.astype(np.int32)
-    mulaw_array = ~mulaw_array
-    sign = mulaw_array & 0x80
-    exponent = (mulaw_array >> 4) & 0x07
-    mantissa = mulaw_array & 0x0F
-    sample = ((mantissa << 3) + 0x84) << exponent
-    sample = np.where(sign != 0, 0x84 - sample, sample - 0x84)
-    pcm = sample.astype(np.int16).tobytes()
+    import audioop
+    pcm = audioop.ulaw2lin(mulaw_bytes, 2)
     buf = io.BytesIO()
     with wave.open(buf, 'wb') as wf:
         wf.setnchannels(1)
@@ -1345,15 +1324,8 @@ def mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 def mulaw_chunk_to_pcm(mulaw_bytes: bytes) -> bytes:
-    mulaw_array = np.frombuffer(mulaw_bytes, dtype=np.uint8)
-    mulaw_array = mulaw_array.astype(np.int32)
-    mulaw_array = ~mulaw_array
-    sign = mulaw_array & 0x80
-    exponent = (mulaw_array >> 4) & 0x07
-    mantissa = mulaw_array & 0x0F
-    sample = ((mantissa << 3) + 0x84) << exponent
-    sample = np.where(sign != 0, 0x84 - sample, sample - 0x84)
-    return sample.astype(np.int16).tobytes()
+    import audioop
+    return audioop.ulaw2lin(mulaw_bytes, 2)
 
 async def transcribe(audio_bytes: bytes, language_hint: str = "en-IN") -> str:
     try:

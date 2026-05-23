@@ -10,4 +10,4 @@ firebase-admin
 beautifulsoup4
 lxml
 google-genai
-miniaudio
+audioop-lts
