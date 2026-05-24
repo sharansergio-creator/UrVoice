@@ -896,6 +896,7 @@ async def audio_stream(websocket: WebSocket):
     business_context = ""
     speaking = False
     silence_frames = 0
+    is_processing = False  # Lock to prevent concurrent STT/LLM processing
     is_playing = False
     conversation_history = []
     session_id = None
@@ -1078,6 +1079,14 @@ async def audio_stream(websocket: WebSocket):
                     if silence_frames >= SILENCE_LIMIT:
                         speaking = False
                         silence_frames = 0
+
+                        if is_processing:
+                            audio_chunks.clear()
+                            speaking = False
+                            silence_frames = 0
+                            continue
+
+                        is_processing = True
                         chunks_to_process = audio_chunks.copy()
                         audio_chunks.clear()
 
@@ -1186,6 +1195,7 @@ async def audio_stream(websocket: WebSocket):
                                         audio_chunks.clear()
                                         speaking = False
                                         silence_frames = 0
+                                        is_processing = False
                                         break
 
                             if ai_response and stream_sid:
@@ -1199,6 +1209,7 @@ async def audio_stream(websocket: WebSocket):
                                 audio_chunks.clear()
                                 speaking = False
                                 silence_frames = 0
+                                is_processing = False
                                 detected_lang = detect_language(transcript)
                                 exchange = {
                                     "transcript": transcript,
