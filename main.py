@@ -1509,18 +1509,18 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
         import time
         tts_start = time.time()
         async with httpx.AsyncClient() as client:
+            # Detect language to choose optimal model
+            # eleven_multilingual_v2 handles Indian languages natively
+            # eleven_flash_v2_5 is faster for English only
+            text_language = detect_language(text)
+            model_id = "eleven_flash_v2_5" if text_language == "en-IN" else "eleven_multilingual_v2"
+
             response = await client.post(
                 f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
                 headers={
                     "xi-api-key": ELEVENLABS_API_KEY,
                     "Content-Type": "application/json"
                 },
-                # Detect language to choose optimal model
-                # eleven_multilingual_v2 handles Indian languages natively
-                # eleven_flash_v2_5 is faster for English only
-                text_language = detect_language(text)
-                model_id = "eleven_flash_v2_5" if text_language == "en-IN" else "eleven_multilingual_v2"
-
                 json={
                     "text": text,
                     "model_id": model_id,
