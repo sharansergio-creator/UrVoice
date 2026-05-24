@@ -1246,17 +1246,7 @@ async def audio_stream(websocket: WebSocket):
 
                             if ai_response and stream_sid:
                                 conversation_history.append({"role": "assistant", "content": ai_response})
-                                audio_chunks.clear()
-                                speaking = False
-                                silence_frames = 0
-                                is_playing = True
-                                await send_audio_response(websocket, stream_sid, ai_response, business_user_id)
-                                is_playing = False
-                                audio_chunks.clear()
-                                speaking = False
-                                silence_frames = 0
-                                import time
-                                last_response_time = time.time()
+
                                 # Detect language from AI response (more reliable than transcript)
                                 # because STT returns English text even for Indian language speech
                                 detected_lang = detect_language(ai_response)
@@ -1266,7 +1256,7 @@ async def audio_stream(websocket: WebSocket):
                                     transcript_lang = detect_language(transcript)
                                     detected_lang = transcript_lang if transcript_lang != "en-IN" else "en-IN"
 
-                                # Detect language switch and inject handoff message
+                                # Detect language switch and compute handoff BEFORE sending response
                                 previous_language = current_language
                                 current_language = detected_lang
 
@@ -1279,9 +1269,9 @@ async def audio_stream(websocket: WebSocket):
                                         # Sujatha handoff to Owner
                                         handoff_message = HANDOFF_TO_OWNER.get(previous_language)
 
+                                # Play handoff message BEFORE AI response if language switched
                                 if handoff_message:
                                     print(f"Language switch detected: {previous_language} -> {current_language}, playing handoff")
-                                    # Play handoff in PREVIOUS voice before switching
                                     audio_chunks.clear()
                                     speaking = False
                                     silence_frames = 0
@@ -1291,7 +1281,18 @@ async def audio_stream(websocket: WebSocket):
                                     audio_chunks.clear()
                                     speaking = False
                                     silence_frames = 0
-                                    last_response_time = time.time()
+
+                                audio_chunks.clear()
+                                speaking = False
+                                silence_frames = 0
+                                is_playing = True
+                                await send_audio_response(websocket, stream_sid, ai_response, business_user_id)
+                                is_playing = False
+                                audio_chunks.clear()
+                                speaking = False
+                                silence_frames = 0
+                                import time
+                                last_response_time = time.time()
 
                                 exchange = {
                                     "transcript": transcript,
@@ -1351,43 +1352,53 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
         import time
         total_start = time.time()
         audio_bytes = await text_to_speech(text, user_id)
-        if audio_bytes:
-            # Check if audio is already mulaw (from ElevenLabs ulaw_8000) or PCM (from Sarvam)
-            # ElevenLabs ulaw_8000 returns raw mulaw directly — no conversion needed
-            # Sarvam returns PCM — needs conversion
-            voice_id = await get_elevenlabs_voice_id(user_id) if user_id else None
-            if user_id and voice_id:
-                try:
-                    import audioop, io
-                    import urllib.request
-                    # Decode MP3 using miniaudio
-                    import miniaudio
-                    decoded = miniaudio.decode(audio_bytes, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=8000)
-                    pcm_8k = bytes(decoded.samples)
-                    if len(pcm_8k) % 2 != 0:
-                        pcm_8k = pcm_8k[:-1]
-                    mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
-                    print(f"ElevenLabs MP3 decoded: {len(audio_bytes)} -> {len(pcm_8k)} PCM -> {len(mulaw_audio)} mulaw")
-                except Exception as conv_err:
-                    print(f"ElevenLabs conversion error: {conv_err}")
-                    fallback = await sarvam_tts(text, "en-IN")
-                    mulaw_audio = audioop.lin2ulaw(fallback, 2) if fallback else b""
-            else:
-                mulaw_audio = pcm_to_mulaw(audio_bytes)  # convert PCM from Sarvam
-            payload = base64.b64encode(mulaw_audio).decode("utf-8")
-            message = {
-                "event": "media",
-                "streamSid": stream_sid,
-                "media": {"payload": payload}
-            }
-            await websocket.send_text(json.dumps(message))
-            total_latency = round((time.time() - total_start) * 1000)
-            print(f"[LATENCY] TOTAL response: {total_latency}ms | text: '{text[:40]}'")
-            print(f"Sent audio response for: {text[:50]}")
+        if not audio_bytes:
+            return
 
-            word_count = len(text.split())
-            wait_time = max(1.5, word_count * 0.35)
-            await asyncio.sleep(wait_time)
+        # text_to_speech already returns the correct format:
+        # - ElevenLabs: returns MP3 bytes (needs miniaudio decode)
+        # - Sarvam: returns PCM bytes (needs audioop mulaw conversion)
+        # We detect which by checking if user_id resulted in ElevenLabs usage
+        language = detect_language(text)
+        use_elevenlabs = (language == "en-IN" and user_id and
+                         await get_elevenlabs_voice_id(user_id, "en") is not None)
+
+        if use_elevenlabs:
+            try:
+                import miniaudio as _miniaudio
+                decoded = _miniaudio.decode(audio_bytes,
+                    output_format=_miniaudio.SampleFormat.SIGNED16,
+                    nchannels=1, sample_rate=8000)
+                pcm_8k = bytes(decoded.samples)
+                if len(pcm_8k) % 2 != 0:
+                    pcm_8k = pcm_8k[:-1]
+                import audioop
+                mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
+            except Exception as e:
+                print(f"ElevenLabs decode error: {e}")
+                fallback = await sarvam_tts(text, "en-IN")
+                import audioop
+                mulaw_audio = audioop.lin2ulaw(fallback, 2) if fallback else b""
+        else:
+            import audioop
+            if len(audio_bytes) % 2 != 0:
+                audio_bytes = audio_bytes[:-1]
+            mulaw_audio = audioop.lin2ulaw(audio_bytes, 2)
+
+        payload = base64.b64encode(mulaw_audio).decode("utf-8")
+        message = {
+            "event": "media",
+            "streamSid": stream_sid,
+            "media": {"payload": payload}
+        }
+        await websocket.send_text(json.dumps(message))
+        total_latency = round((time.time() - total_start) * 1000)
+        print(f"[LATENCY] TOTAL response: {total_latency}ms | text: '{text[:40]}'")
+        print(f"Sent audio response for: {text[:50]}")
+
+        word_count = len(text.split())
+        wait_time = max(1.5, word_count * 0.35)
+        await asyncio.sleep(wait_time)
     except Exception as e:
         print(f"Send audio error: {e}")
 
