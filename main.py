@@ -1320,9 +1320,23 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
                          await get_elevenlabs_voice_id(user_id, "en") is not None)
 
         if use_elevenlabs:
-            # ulaw_8000 returns raw mulaw directly — send straight to Twilio
-            mulaw_audio = audio_bytes
-            print(f"ElevenLabs ulaw direct: {len(mulaw_audio)} bytes")
+            try:
+                import miniaudio as _miniaudio
+                import audioop
+                decoded = _miniaudio.decode(
+                    audio_bytes,
+                    output_format=_miniaudio.SampleFormat.SIGNED16,
+                    nchannels=1,
+                    sample_rate=8000
+                )
+                pcm_8k = bytes(decoded.samples)
+                if len(pcm_8k) % 2 != 0:
+                    pcm_8k = pcm_8k[:-1]
+                mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
+                print(f"ElevenLabs MP3 decoded: {len(audio_bytes)} -> {len(pcm_8k)} -> {len(mulaw_audio)}")
+            except Exception as e:
+                print(f"ElevenLabs decode error: {e}")
+                mulaw_audio = b""
         else:
             import audioop
             if len(audio_bytes) % 2 != 0:
@@ -1468,7 +1482,7 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 json={
                     "text": text,
                     "model_id": model_id,
-                    "output_format": "ulaw_8000",
+                    "output_format": "mp3_44100_128",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
