@@ -1413,25 +1413,27 @@ async def text_to_speech(text: str, user_id: str = None) -> bytes:
     language = detect_language(text)
 
     if user_id and ELEVENLABS_API_KEY:
-        if language == "en-IN":
-            # For English use the English clone
+        lang_to_clone_key = {
+            "en-IN": "en",
+            "kn-IN": "kn",
+            "hi-IN": "hi",
+            "ta-IN": "ta",
+            "te-IN": "te"
+        }
+        clone_key = lang_to_clone_key.get(language, "en")
+
+        # First try language-specific clone
+        voice_id = await get_elevenlabs_voice_id(user_id, clone_key)
+
+        # Fall back to English clone if no language-specific clone
+        if not voice_id and clone_key != "en":
             voice_id = await get_elevenlabs_voice_id(user_id, "en")
-        else:
-            # For Indian languages, prefer English clone with multilingual model
-            # Better quality than Indian language clone recorded in noisy conditions
-            voice_id = await get_elevenlabs_voice_id(user_id, "en")
-            if not voice_id:
-                # Fall back to language-specific clone only if no English clone
-                lang_to_clone_key = {
-                    "kn-IN": "kn", "hi-IN": "hi", "ta-IN": "ta", "te-IN": "te"
-                }
-                clone_key = lang_to_clone_key.get(language, "en")
-                voice_id = await get_elevenlabs_voice_id(user_id, clone_key)
+            print(f"No {clone_key} clone, using English clone for {language}")
 
         if voice_id:
             elevenlabs_audio = await elevenlabs_tts(text, voice_id)
             if elevenlabs_audio:
-                print(f"Using cloned voice for {language}")
+                print(f"Using cloned voice for {language} (clone: {clone_key})")
                 return elevenlabs_audio
 
     print(f"Using Sarvam TTS for language: {language}")
