@@ -1434,12 +1434,30 @@ def detect_language(text: str) -> str:
 async def text_to_speech(text: str, user_id: str = None) -> bytes:
     language = detect_language(text)
 
-    if language == "en-IN" and user_id and ELEVENLABS_API_KEY:
-        voice_id = await get_elevenlabs_voice_id(user_id, "en")
+    # Map language codes to voice clone keys
+    lang_to_clone_key = {
+        "en-IN": "en",
+        "kn-IN": "kn",
+        "hi-IN": "hi",
+        "ta-IN": "ta",
+        "te-IN": "te"
+    }
+
+    clone_key = lang_to_clone_key.get(language, "en")
+
+    if user_id and ELEVENLABS_API_KEY:
+        voice_id = await get_elevenlabs_voice_id(user_id, clone_key)
         if voice_id:
             elevenlabs_audio = await elevenlabs_tts(text, voice_id)
             if elevenlabs_audio:
-                print(f"Using owner cloned voice for English")
+                print(f"Using cloned voice for {language} with eleven_multilingual_v2")
+                return elevenlabs_audio
+        # No clone for this language - fall back to English clone if available
+        english_voice_id = await get_elevenlabs_voice_id(user_id, "en")
+        if english_voice_id and language != "en-IN":
+            print(f"No {clone_key} clone, using English clone with multilingual model for {language}")
+            elevenlabs_audio = await elevenlabs_tts(text, english_voice_id)
+            if elevenlabs_audio:
                 return elevenlabs_audio
 
     print(f"Using Sarvam TTS for language: {language}")
@@ -1497,9 +1515,15 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                     "xi-api-key": ELEVENLABS_API_KEY,
                     "Content-Type": "application/json"
                 },
+                # Detect language to choose optimal model
+                # eleven_multilingual_v2 handles Indian languages natively
+                # eleven_flash_v2_5 is faster for English only
+                text_language = detect_language(text)
+                model_id = "eleven_flash_v2_5" if text_language == "en-IN" else "eleven_multilingual_v2"
+
                 json={
                     "text": text,
-                    "model_id": "eleven_flash_v2_5",
+                    "model_id": model_id,
                     "output_format": "mp3_44100_128",
                     "voice_settings": {
                         "stability": 0.5,
