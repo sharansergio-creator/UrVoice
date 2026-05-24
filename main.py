@@ -960,6 +960,7 @@ async def audio_stream(websocket: WebSocket):
                     audio_chunks.clear()
                     speaking = False
                     silence_frames = 0
+                    is_processing = False
                     await send_audio_response(websocket, stream_sid, sorry, business_user_id)
                     return
 
@@ -1053,6 +1054,7 @@ async def audio_stream(websocket: WebSocket):
                 audio_chunks.clear()
                 speaking = False
                 silence_frames = 0
+                is_processing = False
                 if is_blocked:
                     break
 
