@@ -1323,8 +1323,19 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
             try:
                 import miniaudio as _miniaudio
                 import audioop
+                # Strip ID3 tag if present before decoding
+                audio_to_decode = audio_bytes
+                if audio_bytes[:3] == b'ID3':
+                    # Find end of ID3 tag
+                    id3_size = ((audio_bytes[6] & 0x7f) << 21 |
+                               (audio_bytes[7] & 0x7f) << 14 |
+                               (audio_bytes[8] & 0x7f) << 7 |
+                               (audio_bytes[9] & 0x7f)) + 10
+                    audio_to_decode = audio_bytes[id3_size:]
+                    print(f"Stripped ID3 tag: {id3_size} bytes, remaining: {len(audio_to_decode)}")
+
                 decoded = _miniaudio.decode(
-                    audio_bytes,
+                    audio_to_decode,
                     output_format=_miniaudio.SampleFormat.SIGNED16,
                     nchannels=1,
                     sample_rate=8000
@@ -1336,7 +1347,12 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
                 print(f"ElevenLabs MP3 decoded: {len(audio_bytes)} -> {len(pcm_8k)} -> {len(mulaw_audio)}")
             except Exception as e:
                 print(f"ElevenLabs decode error: {e}")
-                mulaw_audio = b""
+                import traceback
+                traceback.print_exc()
+                # Fall back to Sarvam for this response
+                fallback = await sarvam_tts(text, detect_language(text))
+                import audioop
+                mulaw_audio = audioop.lin2ulaw(fallback, 2) if fallback else b""
         else:
             import audioop
             if len(audio_bytes) % 2 != 0:
