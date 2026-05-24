@@ -1392,30 +1392,26 @@ def detect_language(text: str) -> str:
 async def text_to_speech(text: str, user_id: str = None) -> bytes:
     language = detect_language(text)
 
-    # Map language codes to voice clone keys
-    lang_to_clone_key = {
-        "en-IN": "en",
-        "kn-IN": "kn",
-        "hi-IN": "hi",
-        "ta-IN": "ta",
-        "te-IN": "te"
-    }
-
-    clone_key = lang_to_clone_key.get(language, "en")
-
     if user_id and ELEVENLABS_API_KEY:
-        voice_id = await get_elevenlabs_voice_id(user_id, clone_key)
+        if language == "en-IN":
+            # For English use the English clone
+            voice_id = await get_elevenlabs_voice_id(user_id, "en")
+        else:
+            # For Indian languages, prefer English clone with multilingual model
+            # Better quality than Indian language clone recorded in noisy conditions
+            voice_id = await get_elevenlabs_voice_id(user_id, "en")
+            if not voice_id:
+                # Fall back to language-specific clone only if no English clone
+                lang_to_clone_key = {
+                    "kn-IN": "kn", "hi-IN": "hi", "ta-IN": "ta", "te-IN": "te"
+                }
+                clone_key = lang_to_clone_key.get(language, "en")
+                voice_id = await get_elevenlabs_voice_id(user_id, clone_key)
+
         if voice_id:
             elevenlabs_audio = await elevenlabs_tts(text, voice_id)
             if elevenlabs_audio:
-                print(f"Using cloned voice for {language} with eleven_multilingual_v2")
-                return elevenlabs_audio
-        # No clone for this language - fall back to English clone if available
-        english_voice_id = await get_elevenlabs_voice_id(user_id, "en")
-        if english_voice_id and language != "en-IN":
-            print(f"No {clone_key} clone, using English clone with multilingual model for {language}")
-            elevenlabs_audio = await elevenlabs_tts(text, english_voice_id)
-            if elevenlabs_audio:
+                print(f"Using cloned voice for {language}")
                 return elevenlabs_audio
 
     print(f"Using Sarvam TTS for language: {language}")
