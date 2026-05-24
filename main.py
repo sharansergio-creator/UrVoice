@@ -1320,20 +1320,9 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
                          await get_elevenlabs_voice_id(user_id, "en") is not None)
 
         if use_elevenlabs:
-            try:
-                import audioop
-                # ElevenLabs pcm_22050 returns raw 16-bit PCM at 22050Hz
-                # Resample from 22050Hz to 8000Hz
-                if len(audio_bytes) % 2 != 0:
-                    audio_bytes = audio_bytes[:-1]
-                pcm_8k, _ = audioop.ratecv(audio_bytes, 2, 1, 22050, 8000, None)
-                if len(pcm_8k) % 2 != 0:
-                    pcm_8k = pcm_8k[:-1]
-                mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
-                print(f"ElevenLabs PCM resampled: {len(audio_bytes)} -> {len(pcm_8k)} -> {len(mulaw_audio)}")
-            except Exception as e:
-                print(f"ElevenLabs decode error: {e}")
-                mulaw_audio = b""
+            # ulaw_8000 returns raw mulaw directly — send straight to Twilio
+            mulaw_audio = audio_bytes
+            print(f"ElevenLabs ulaw direct: {len(mulaw_audio)} bytes")
         else:
             import audioop
             if len(audio_bytes) % 2 != 0:
@@ -1479,7 +1468,7 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 json={
                     "text": text,
                     "model_id": model_id,
-                    "output_format": "pcm_22050",
+                    "output_format": "ulaw_8000",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
@@ -1492,6 +1481,7 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
             tts_latency = round((time.time() - tts_start) * 1000)
             if response.status_code == 200:
                 print(f"[LATENCY] TTS ElevenLabs: {tts_latency}ms | voice: {voice_id}")
+                print(f"ElevenLabs first 4 bytes: {response.content[:4].hex()} len: {len(response.content)}")
                 return response.content
             else:
                 print(f"ElevenLabs TTS error: {response.status_code} {response.text}")
