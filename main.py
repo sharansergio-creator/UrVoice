@@ -1257,7 +1257,14 @@ async def audio_stream(websocket: WebSocket):
                                 silence_frames = 0
                                 import time
                                 last_response_time = time.time()
-                                detected_lang = detect_language(transcript)
+                                # Detect language from AI response (more reliable than transcript)
+                                # because STT returns English text even for Indian language speech
+                                detected_lang = detect_language(ai_response)
+                                if detected_lang == "en-IN":
+                                    # Double check transcript in case AI responded in English
+                                    # but caller was speaking Indian language
+                                    transcript_lang = detect_language(transcript)
+                                    detected_lang = transcript_lang if transcript_lang != "en-IN" else "en-IN"
 
                                 # Detect language switch and inject handoff message
                                 previous_language = current_language
@@ -1416,27 +1423,15 @@ def detect_language(text: str) -> str:
 async def text_to_speech(text: str, user_id: str = None) -> bytes:
     language = detect_language(text)
 
-    # Map internal language codes to ElevenLabs voice clone keys
-    lang_to_clone_key = {
-        "en-IN": "en",
-        "kn-IN": "kn",
-        "hi-IN": "hi",
-        "ta-IN": "ta",
-        "te-IN": "te"
-    }
-
-    clone_key = lang_to_clone_key.get(language, "en")
-
-    if user_id and ELEVENLABS_API_KEY:
-        voice_id = await get_elevenlabs_voice_id(user_id, clone_key)
+    if language == "en-IN" and user_id and ELEVENLABS_API_KEY:
+        voice_id = await get_elevenlabs_voice_id(user_id, "en")
         if voice_id:
             elevenlabs_audio = await elevenlabs_tts(text, voice_id)
             if elevenlabs_audio:
-                print(f"Using cloned voice for language: {language} (clone key: {clone_key})")
+                print(f"Using owner cloned voice for English")
                 return elevenlabs_audio
 
-    # Fall back to Sarvam for any language without a clone
-    print(f"No voice clone for {language}, using Sarvam TTS")
+    print(f"Using Sarvam TTS for language: {language}")
     return await sarvam_tts(text, language)
 
 async def sarvam_tts(text: str, language_code: str) -> bytes:
