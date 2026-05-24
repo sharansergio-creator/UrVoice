@@ -956,6 +956,9 @@ async def audio_stream(websocket: WebSocket):
 
                 if answer_mode == "NEVER":
                     sorry = "Sorry, we are not available to take calls right now. Please try again later."
+                    audio_chunks.clear()
+                    speaking = False
+                    silence_frames = 0
                     await send_audio_response(websocket, stream_sid, sorry, business_user_id)
                     return
 
@@ -1040,6 +1043,9 @@ async def audio_stream(websocket: WebSocket):
                     {"sessionId": session_id, "callerName": caller_name or "", "type": "CALL_STARTED"}
                 ))
 
+                audio_chunks.clear()
+                speaking = False
+                silence_frames = 0
                 is_playing = True
                 await send_audio_response(websocket, stream_sid, greeting, business_user_id)
                 is_playing = False
@@ -1171,6 +1177,9 @@ async def audio_stream(websocket: WebSocket):
                                                 print(f"Session spam update error: {e}")
                                         print(f"Caller {caller_number} logged as SPAM after {name_attempts} name attempts")
                                         sorry_msg = "I'm sorry I couldn't get your name, please call back when ready. Goodbye."
+                                        audio_chunks.clear()
+                                        speaking = False
+                                        silence_frames = 0
                                         is_playing = True
                                         await send_audio_response(websocket, stream_sid, sorry_msg, business_user_id)
                                         is_playing = False
@@ -1181,6 +1190,9 @@ async def audio_stream(websocket: WebSocket):
 
                             if ai_response and stream_sid:
                                 conversation_history.append({"role": "assistant", "content": ai_response})
+                                audio_chunks.clear()
+                                speaking = False
+                                silence_frames = 0
                                 is_playing = True
                                 await send_audio_response(websocket, stream_sid, ai_response, business_user_id)
                                 is_playing = False
@@ -1281,7 +1293,7 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
             print(f"Sent audio response for: {text[:50]}")
 
             word_count = len(text.split())
-            wait_time = max(1.0, word_count * 0.3)
+            wait_time = max(1.5, word_count * 0.35)
             await asyncio.sleep(wait_time)
     except Exception as e:
         print(f"Send audio error: {e}")
