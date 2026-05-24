@@ -15,7 +15,7 @@ import numpy as np
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
-from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion, Increment
+from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion, Increment, DELETE_FIELD
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 
@@ -634,13 +634,25 @@ async def provision_number(body: ProvisionNumberRequest):
         return {"error": str(e)}
 
 
-async def get_elevenlabs_voice_id(user_id: str) -> str | None:
-    """Check if user has a cloned ElevenLabs voice ID in Firestore."""
+async def get_elevenlabs_voice_id(user_id: str, language: str = "en") -> str | None:
+    """
+    Get ElevenLabs voice ID for a specific language.
+    Checks voiceClones map first (new multi-language), 
+    falls back to elevenLabsVoiceId (legacy single voice).
+    """
     try:
         db = get_db()
         doc = db.collection("users").document(user_id).get()
         if doc.exists:
-            return doc.to_dict().get("elevenLabsVoiceId")
+            data = doc.to_dict()
+            # New multi-language voice clones map
+            voice_clones = data.get("voiceClones", {})
+            if voice_clones and language in voice_clones:
+                return voice_clones[language]
+            # Legacy fallback — single voice ID
+            legacy = data.get("elevenLabsVoiceId")
+            if legacy:
+                return legacy
     except Exception as e:
         print(f"get_elevenlabs_voice_id error: {e}")
     return None
@@ -649,25 +661,25 @@ async def get_elevenlabs_voice_id(user_id: str) -> str | None:
 @app.post("/clone-voice")
 async def clone_voice(
     user_id: str = Form(...),
+    language: str = Form(default="en"),
     audio: UploadFile = File(...)
 ):
     """
-    Receive audio sample from Android app,
-    send to ElevenLabs to create a voice clone,
-    save the voice_id to Firestore users/{userId}.
+    Receive audio sample, send to ElevenLabs to create voice clone,
+    save voice_id to Firestore users/{userId}/voiceClones/{language}.
     """
     try:
         audio_bytes = await audio.read()
-        print(f"Received audio for cloning: {len(audio_bytes)} bytes for user {user_id}")
+        print(f"Received audio for cloning: {len(audio_bytes)} bytes for user {user_id}, language: {language}")
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 "https://api.elevenlabs.io/v1/voices/add",
                 headers={"xi-api-key": ELEVENLABS_API_KEY},
-                files={"files": (audio.filename or "voice_sample.m4a", audio_bytes, "audio/m4a")},
+                files={"files": (audio.filename or f"voice_{language}.m4a", audio_bytes, "audio/m4a")},
                 data={
-                    "name": f"UrVoice_{user_id[:8]}",
-                    "description": "Voice clone for UrVoice AI assistant"
+                    "name": f"UrVoice_{user_id[:8]}_{language}",
+                    "description": f"Voice clone for UrVoice AI assistant - {language}"
                 },
                 timeout=60
             )
@@ -678,15 +690,22 @@ async def clone_voice(
 
             result = response.json()
             voice_id = result.get("voice_id")
-            print(f"Voice cloned successfully: {voice_id} for user {user_id}")
+            print(f"Voice cloned successfully: {voice_id} for user {user_id}, language: {language}")
 
-            # Save voice_id to Firestore
+            # Save to voiceClones map in Firestore
             db = get_db()
-            db.collection("users").document(user_id).update({
-                "elevenLabsVoiceId": voice_id
-            })
+            db.collection("users").document(user_id).set(
+                {"voiceClones": {language: voice_id}},
+                merge=True
+            )
 
-            return {"success": True, "voiceId": voice_id}
+            # Also update legacy elevenLabsVoiceId for English (backward compat)
+            if language == "en":
+                db.collection("users").document(user_id).update({
+                    "elevenLabsVoiceId": voice_id
+                })
+
+            return {"success": True, "voiceId": voice_id, "language": language}
 
     except Exception as e:
         print(f"clone_voice error: {e}")
@@ -695,11 +714,12 @@ async def clone_voice(
 
 @app.post("/delete-voice")
 async def delete_voice(request: Request):
-    """Remove ElevenLabs voice clone and clear from Firestore."""
+    """Remove ElevenLabs voice clone for a specific language and clear from Firestore."""
     try:
         body = await request.json()
         user_id = body.get("user_id")
         voice_id = body.get("voice_id")
+        language = body.get("language", "en")
 
         async with httpx.AsyncClient() as client:
             response = await client.delete(
@@ -709,12 +729,19 @@ async def delete_voice(request: Request):
             )
             print(f"ElevenLabs delete response: {response.status_code}")
 
+        # Remove from voiceClones map
         db = get_db()
         db.collection("users").document(user_id).update({
-            "elevenLabsVoiceId": None
+            f"voiceClones.{language}": DELETE_FIELD
         })
 
-        return {"success": True}
+        # Clear legacy field if English
+        if language == "en":
+            db.collection("users").document(user_id).update({
+                "elevenLabsVoiceId": None
+            })
+
+        return {"success": True, "language": language}
     except Exception as e:
         print(f"delete_voice error: {e}")
         return {"error": str(e)}
@@ -1342,15 +1369,27 @@ def detect_language(text: str) -> str:
 async def text_to_speech(text: str, user_id: str = None) -> bytes:
     language = detect_language(text)
 
-    # Check if user has ElevenLabs voice clone
+    # Map internal language codes to ElevenLabs voice clone keys
+    lang_to_clone_key = {
+        "en-IN": "en",
+        "kn-IN": "kn",
+        "hi-IN": "hi",
+        "ta-IN": "ta",
+        "te-IN": "te"
+    }
+
+    clone_key = lang_to_clone_key.get(language, "en")
+
     if user_id and ELEVENLABS_API_KEY:
-        voice_id = await get_elevenlabs_voice_id(user_id)
+        voice_id = await get_elevenlabs_voice_id(user_id, clone_key)
         if voice_id:
             elevenlabs_audio = await elevenlabs_tts(text, voice_id)
             if elevenlabs_audio:
+                print(f"Using cloned voice for language: {language} (clone key: {clone_key})")
                 return elevenlabs_audio
 
-    # Fall back to Sarvam
+    # Fall back to Sarvam for any language without a clone
+    print(f"No voice clone for {language}, using Sarvam TTS")
     return await sarvam_tts(text, language)
 
 async def sarvam_tts(text: str, language_code: str) -> bytes:
