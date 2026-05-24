@@ -38,6 +38,53 @@ if _firebase_creds_json and not firebase_admin._apps:
 def get_db():
     return firestore.client()
 
+def create_vad(aggressiveness: int = 2):
+    """
+    Create a WebRTC VAD instance.
+    aggressiveness: 0 (least aggressive) to 3 (most aggressive)
+    Higher = more aggressive filtering of non-speech
+    2 is recommended for phone calls
+    """
+    import webrtcvad
+    vad = webrtcvad.Vad(aggressiveness)
+    return vad
+
+def is_speech(vad, pcm_chunk: bytes, sample_rate: int = 8000) -> bool:
+    """
+    Check if a PCM audio chunk contains speech.
+    WebRTC VAD requires chunks of exactly 10ms, 20ms, or 30ms.
+    At 8000Hz, 16-bit mono:
+    - 10ms = 160 bytes
+    - 20ms = 320 bytes  
+    - 30ms = 480 bytes
+    We use 20ms frames (320 bytes).
+    """
+    import webrtcvad
+    FRAME_SIZE = 320  # 20ms at 8000Hz 16-bit mono
+    
+    if len(pcm_chunk) < FRAME_SIZE:
+        return False
+    
+    # Check multiple 20ms frames and return True if any contains speech
+    speech_frames = 0
+    total_frames = 0
+    
+    for i in range(0, len(pcm_chunk) - FRAME_SIZE + 1, FRAME_SIZE):
+        frame = pcm_chunk[i:i + FRAME_SIZE]
+        if len(frame) == FRAME_SIZE:
+            try:
+                if vad.is_speech(frame, sample_rate):
+                    speech_frames += 1
+                total_frames += 1
+            except Exception:
+                continue
+    
+    if total_frames == 0:
+        return False
+    
+    # Consider as speech if more than 30% of frames contain speech
+    return (speech_frames / total_frames) > 0.3
+
 async def get_user_id_from_phone(called_number: str) -> str:
     """Look up which userId owns this Twilio number from Firestore phone_mappings."""
     try:
@@ -862,7 +909,9 @@ async def audio_stream(websocket: WebSocket):
     hours_string = ""
     name_collected = False
     SILENCE_LIMIT = 20
-    RMS_THRESHOLD = 500
+    # Initialize WebRTC VAD
+    import webrtcvad as _webrtcvad
+    vad = _webrtcvad.Vad(2)  # aggressiveness 2 = balanced for phone calls
 
     try:
         while True:
@@ -1000,10 +1049,11 @@ async def audio_stream(websocket: WebSocket):
                 audio_chunks.append(data["media"]["payload"])
 
                 pcm_chunk = mulaw_chunk_to_pcm(raw_chunk)
-                samples = np.frombuffer(pcm_chunk, dtype=np.int16).astype(np.float32)
-                rms = np.sqrt(np.mean(samples ** 2))
-
-                if rms > RMS_THRESHOLD:
+                
+                # WebRTC VAD - more accurate than RMS threshold
+                has_speech = is_speech(vad, pcm_chunk)
+                
+                if has_speech:
                     speaking = True
                     silence_frames = 0
                 elif speaking:
