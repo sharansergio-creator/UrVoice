@@ -82,8 +82,8 @@ def is_speech(vad, pcm_chunk: bytes, sample_rate: int = 8000) -> bool:
     if total_frames == 0:
         return False
     
-    # Consider as speech if more than 30% of frames contain speech
-    return (speech_frames / total_frames) > 0.3
+    # Consider as speech if more than 50% of frames contain speech
+    return (speech_frames / total_frames) > 0.5
 
 async def get_user_id_from_phone(called_number: str) -> str:
     """Look up which userId owns this Twilio number from Firestore phone_mappings."""
@@ -911,7 +911,7 @@ async def audio_stream(websocket: WebSocket):
     SILENCE_LIMIT = 20
     # Initialize WebRTC VAD
     import webrtcvad as _webrtcvad
-    vad = _webrtcvad.Vad(2)  # aggressiveness 2 = balanced for phone calls
+    vad = _webrtcvad.Vad(3)  # aggressiveness 3 = most aggressive filtering
 
     try:
         while True:
@@ -1084,7 +1084,10 @@ async def audio_stream(websocket: WebSocket):
                         is_likely_hallucination = (
                             word_count == 1 and len(transcript_clean) <= 4
                         )
-                        if transcript_clean and len(transcript_clean) > 2 and not is_likely_hallucination:
+                        is_noise_description = (
+                            transcript_clean.startswith("(") and transcript_clean.endswith(")")
+                        )
+                        if transcript_clean and len(transcript_clean) > 2 and not is_likely_hallucination and not is_noise_description:
                             conversation_history.append({"role": "user", "content": transcript})
 
                             # Augment system context with name-collection directive for UNKNOWN callers
