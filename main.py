@@ -25,22 +25,6 @@ app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-HANDOFF_TO_SUJATHA = {
-    "en-IN": {
-        "kn-IN": "Sure, let me get Sujatha who speaks Kannada!",
-        "hi-IN": "Of course, Sujatha handles Hindi — let me connect you!",
-        "ta-IN": "Sure, connecting you with Sujatha now!",
-        "te-IN": "Of course, let me connect you with Sujatha!"
-    }
-}
-
-HANDOFF_TO_OWNER = {
-    "kn-IN": "ಸರಿ, ನಾನು ನನ್ನ ಸಹೋದ್ಯೋಗಿಗೆ ವರ್ಗಾಯಿಸುತ್ತೇನೆ!",
-    "hi-IN": "ठीक है, मैं अभी कनेक्ट करती हूँ!",
-    "ta-IN": "சரி, இப்போது இணைக்கிறேன்!",
-    "te-IN": "సరే, నేను ఇప్పుడు కనెక్ట్ చేస్తున్నాను!"
-}
-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -948,8 +932,6 @@ async def audio_stream(websocket: WebSocket):
     exchanges = []
     caller_name = None
     caller_type = "UNKNOWN"
-    current_language = "en-IN"  # Track current conversation language
-    previous_language = "en-IN"  # Track previous language for handoff detection
     name_attempts = 0
     is_blocked = False
     is_after_hours = False
@@ -1256,32 +1238,6 @@ async def audio_stream(websocket: WebSocket):
                                     transcript_lang = detect_language(transcript)
                                     detected_lang = transcript_lang if transcript_lang != "en-IN" else "en-IN"
 
-                                # Detect language switch and compute handoff BEFORE sending response
-                                previous_language = current_language
-                                current_language = detected_lang
-
-                                handoff_message = None
-                                if previous_language != current_language:
-                                    if previous_language == "en-IN" and current_language != "en-IN":
-                                        # Owner handoff to Sujatha
-                                        handoff_message = HANDOFF_TO_SUJATHA.get("en-IN", {}).get(current_language)
-                                    elif previous_language != "en-IN" and current_language == "en-IN":
-                                        # Sujatha handoff to Owner
-                                        handoff_message = HANDOFF_TO_OWNER.get(previous_language)
-
-                                # Play handoff message BEFORE AI response if language switched
-                                if handoff_message:
-                                    print(f"Language switch detected: {previous_language} -> {current_language}, playing handoff")
-                                    audio_chunks.clear()
-                                    speaking = False
-                                    silence_frames = 0
-                                    is_playing = True
-                                    await send_audio_response(websocket, stream_sid, handoff_message, business_user_id if previous_language == "en-IN" else None)
-                                    is_playing = False
-                                    audio_chunks.clear()
-                                    speaking = False
-                                    silence_frames = 0
-
                                 audio_chunks.clear()
                                 speaking = False
                                 silence_frames = 0
@@ -1355,9 +1311,9 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
         if not audio_bytes:
             return
 
-        # text_to_speech already returns the correct format:
-        # - ElevenLabs: returns MP3 bytes (needs miniaudio decode)
-        # - Sarvam: returns PCM bytes (needs audioop mulaw conversion)
+        # text_to_speech returns the correct format:
+        # - ElevenLabs pcm_22050: raw 16-bit PCM at 22050Hz (needs resample + mulaw)
+        # - Sarvam: raw 16-bit PCM at 8000Hz (needs mulaw conversion only)
         # We detect which by checking if user_id resulted in ElevenLabs usage
         language = detect_language(text)
         use_elevenlabs = (language == "en-IN" and user_id and
@@ -1365,20 +1321,19 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
 
         if use_elevenlabs:
             try:
-                import miniaudio as _miniaudio
-                decoded = _miniaudio.decode(audio_bytes,
-                    output_format=_miniaudio.SampleFormat.SIGNED16,
-                    nchannels=1, sample_rate=8000)
-                pcm_8k = bytes(decoded.samples)
+                import audioop
+                # ElevenLabs pcm_22050 returns raw 16-bit PCM at 22050Hz
+                # Resample from 22050Hz to 8000Hz
+                if len(audio_bytes) % 2 != 0:
+                    audio_bytes = audio_bytes[:-1]
+                pcm_8k, _ = audioop.ratecv(audio_bytes, 2, 1, 22050, 8000, None)
                 if len(pcm_8k) % 2 != 0:
                     pcm_8k = pcm_8k[:-1]
-                import audioop
                 mulaw_audio = audioop.lin2ulaw(pcm_8k, 2)
+                print(f"ElevenLabs PCM resampled: {len(audio_bytes)} -> {len(pcm_8k)} -> {len(mulaw_audio)}")
             except Exception as e:
                 print(f"ElevenLabs decode error: {e}")
-                fallback = await sarvam_tts(text, "en-IN")
-                import audioop
-                mulaw_audio = audioop.lin2ulaw(fallback, 2) if fallback else b""
+                mulaw_audio = b""
         else:
             import audioop
             if len(audio_bytes) % 2 != 0:
@@ -1524,7 +1479,7 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 json={
                     "text": text,
                     "model_id": model_id,
-                    "output_format": "mp3_44100_128",
+                    "output_format": "pcm_22050",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
