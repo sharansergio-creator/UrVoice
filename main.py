@@ -1316,9 +1316,12 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
         # - Sarvam: raw 16-bit PCM at 8000Hz (needs mulaw conversion only)
         # We detect which by checking if user_id resulted in ElevenLabs usage
         language = detect_language(text)
-        # Use ElevenLabs decode for ANY language when user has a voice clone
-        # because text_to_speech() returns ElevenLabs MP3 for all languages when clone exists
-        use_elevenlabs = (user_id is not None and
+        # Check if user has any voice clone (determines decode path)
+        has_voice_clone = False
+        if user_id:
+            en_voice = await get_elevenlabs_voice_id(user_id, "en")
+            has_voice_clone = en_voice is not None
+        use_elevenlabs = has_voice_clone
 
         if use_elevenlabs:
             try:
