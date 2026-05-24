@@ -896,7 +896,7 @@ async def audio_stream(websocket: WebSocket):
     business_context = ""
     speaking = False
     silence_frames = 0
-    is_processing = False  # Lock to prevent concurrent STT/LLM processing
+    last_response_time = 0.0  # timestamp of last AI response completion
     is_playing = False
     conversation_history = []
     session_id = None
@@ -960,7 +960,6 @@ async def audio_stream(websocket: WebSocket):
                     audio_chunks.clear()
                     speaking = False
                     silence_frames = 0
-                    is_processing = False
                     await send_audio_response(websocket, stream_sid, sorry, business_user_id)
                     return
 
@@ -1054,7 +1053,6 @@ async def audio_stream(websocket: WebSocket):
                 audio_chunks.clear()
                 speaking = False
                 silence_frames = 0
-                is_processing = False
                 if is_blocked:
                     break
 
@@ -1082,13 +1080,14 @@ async def audio_stream(websocket: WebSocket):
                         speaking = False
                         silence_frames = 0
 
-                        if is_processing:
+                        import time
+                        # Ignore speech detected within 1.5 seconds of last AI response
+                        if time.time() - last_response_time < 1.5:
                             audio_chunks.clear()
                             speaking = False
                             silence_frames = 0
                             continue
 
-                        is_processing = True
                         chunks_to_process = audio_chunks.copy()
                         audio_chunks.clear()
 
@@ -1197,7 +1196,6 @@ async def audio_stream(websocket: WebSocket):
                                         audio_chunks.clear()
                                         speaking = False
                                         silence_frames = 0
-                                        is_processing = False
                                         break
 
                             if ai_response and stream_sid:
@@ -1211,7 +1209,8 @@ async def audio_stream(websocket: WebSocket):
                                 audio_chunks.clear()
                                 speaking = False
                                 silence_frames = 0
-                                is_processing = False
+                                import time
+                                last_response_time = time.time()
                                 detected_lang = detect_language(transcript)
                                 exchange = {
                                     "transcript": transcript,
