@@ -1243,6 +1243,8 @@ async def audio_stream(websocket: WebSocket):
 
 async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, user_id: str = None):
     try:
+        import time
+        total_start = time.time()
         audio_bytes = await text_to_speech(text, user_id)
         if audio_bytes:
             # Check if audio is already mulaw (from ElevenLabs ulaw_8000) or PCM (from Sarvam)
@@ -1274,6 +1276,8 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
                 "media": {"payload": payload}
             }
             await websocket.send_text(json.dumps(message))
+            total_latency = round((time.time() - total_start) * 1000)
+            print(f"[LATENCY] TOTAL response: {total_latency}ms | text: '{text[:40]}'")
             print(f"Sent audio response for: {text[:50]}")
 
             word_count = len(text.split())
@@ -1327,6 +1331,8 @@ async def text_to_speech(text: str, user_id: str = None) -> bytes:
 
 async def sarvam_tts(text: str, language_code: str) -> bytes:
     try:
+        import time
+        tts_start = time.time()
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 "https://api.sarvam.ai/text-to-speech",
@@ -1346,7 +1352,9 @@ async def sarvam_tts(text: str, language_code: str) -> bytes:
                 },
                 timeout=30
             )
+            tts_latency = round((time.time() - tts_start) * 1000)
             if response.status_code == 200:
+                print(f"[LATENCY] TTS Sarvam: {tts_latency}ms | lang: {language_code}")
                 result = response.json()
                 audio_b64 = result["audios"][0]
                 audio_bytes = base64.b64decode(audio_b64)
@@ -1364,6 +1372,8 @@ async def sarvam_tts(text: str, language_code: str) -> bytes:
 async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
     """Generate speech using ElevenLabs with user's cloned voice."""
     try:
+        import time
+        tts_start = time.time()
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
@@ -1384,8 +1394,9 @@ async def elevenlabs_tts(text: str, voice_id: str) -> bytes | None:
                 },
                 timeout=30
             )
+            tts_latency = round((time.time() - tts_start) * 1000)
             if response.status_code == 200:
-                print(f"ElevenLabs TTS success for voice {voice_id}")
+                print(f"[LATENCY] TTS ElevenLabs: {tts_latency}ms | voice: {voice_id}")
                 return response.content
             else:
                 print(f"ElevenLabs TTS error: {response.status_code} {response.text}")
@@ -1415,7 +1426,6 @@ def mulaw_chunk_to_pcm(mulaw_bytes: bytes) -> bytes:
 
 async def transcribe(audio_bytes: bytes, language_hint: str = "en-IN") -> str:
     try:
-        # Map Sarvam language codes to ElevenLabs language codes
         lang_map = {
             "en-IN": "en",
             "kn-IN": "kan",
@@ -1424,6 +1434,9 @@ async def transcribe(audio_bytes: bytes, language_hint: str = "en-IN") -> str:
             "te-IN": "te"
         }
         elevenlabs_lang = lang_map.get(language_hint, "en")
+
+        import time
+        stt_start = time.time()
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -1436,11 +1449,12 @@ async def transcribe(audio_bytes: bytes, language_hint: str = "en-IN") -> str:
                 },
                 timeout=30
             )
+            stt_latency = round((time.time() - stt_start) * 1000)
             if response.status_code == 200:
                 result = response.json()
                 transcript = result.get("text", "")
                 detected = result.get("language_code", elevenlabs_lang)
-                print(f"ElevenLabs STT: '{transcript[:50]}' (lang: {detected})")
+                print(f"[LATENCY] STT: {stt_latency}ms | lang: {detected} | text: '{transcript[:40]}'")
                 return transcript
             else:
                 print(f"ElevenLabs STT error: {response.status_code} {response.text}")
@@ -1466,6 +1480,8 @@ async def get_ai_response(conversation_history: list, business_context: str = ""
             role = "user" if msg["role"] == "user" else "model"
             contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
+        import time
+        llm_start = time.time()
         response = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: client.models.generate_content(
@@ -1477,7 +1493,8 @@ async def get_ai_response(conversation_history: list, business_context: str = ""
                 )
             )
         )
-
+        llm_latency = round((time.time() - llm_start) * 1000)
+        print(f"[LATENCY] LLM: {llm_latency}ms | response: '{response.text[:40]}'")
         return response.text
     except Exception as e:
         print(f"Gemini error: {e}")
