@@ -24,6 +24,23 @@ load_dotenv()
 app = FastAPI()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+
+HANDOFF_TO_SUJATHA = {
+    "en-IN": {
+        "kn-IN": "Sure, let me get Sujatha who speaks Kannada!",
+        "hi-IN": "Of course, Sujatha handles Hindi — let me connect you!",
+        "ta-IN": "Sure, connecting you with Sujatha now!",
+        "te-IN": "Of course, let me connect you with Sujatha!"
+    }
+}
+
+HANDOFF_TO_OWNER = {
+    "kn-IN": "ಸರಿ, ನಾನು ನನ್ನ ಸಹೋದ್ಯೋಗಿಗೆ ವರ್ಗಾಯಿಸುತ್ತೇನೆ!",
+    "hi-IN": "ठीक है, मैं अभी कनेक्ट करती हूँ!",
+    "ta-IN": "சரி, இப்போது இணைக்கிறேன்!",
+    "te-IN": "సరే, నేను ఇప్పుడు కనెక్ట్ చేస్తున్నాను!"
+}
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -931,6 +948,8 @@ async def audio_stream(websocket: WebSocket):
     exchanges = []
     caller_name = None
     caller_type = "UNKNOWN"
+    current_language = "en-IN"  # Track current conversation language
+    previous_language = "en-IN"  # Track previous language for handoff detection
     name_attempts = 0
     is_blocked = False
     is_after_hours = False
@@ -1239,6 +1258,34 @@ async def audio_stream(websocket: WebSocket):
                                 import time
                                 last_response_time = time.time()
                                 detected_lang = detect_language(transcript)
+
+                                # Detect language switch and inject handoff message
+                                previous_language = current_language
+                                current_language = detected_lang
+
+                                handoff_message = None
+                                if previous_language != current_language:
+                                    if previous_language == "en-IN" and current_language != "en-IN":
+                                        # Owner handoff to Sujatha
+                                        handoff_message = HANDOFF_TO_SUJATHA.get("en-IN", {}).get(current_language)
+                                    elif previous_language != "en-IN" and current_language == "en-IN":
+                                        # Sujatha handoff to Owner
+                                        handoff_message = HANDOFF_TO_OWNER.get(previous_language)
+
+                                if handoff_message:
+                                    print(f"Language switch detected: {previous_language} -> {current_language}, playing handoff")
+                                    # Play handoff in PREVIOUS voice before switching
+                                    audio_chunks.clear()
+                                    speaking = False
+                                    silence_frames = 0
+                                    is_playing = True
+                                    await send_audio_response(websocket, stream_sid, handoff_message, business_user_id if previous_language == "en-IN" else None)
+                                    is_playing = False
+                                    audio_chunks.clear()
+                                    speaking = False
+                                    silence_frames = 0
+                                    last_response_time = time.time()
+
                                 exchange = {
                                     "transcript": transcript,
                                     "aiResponse": ai_response,
