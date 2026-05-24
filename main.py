@@ -908,14 +908,25 @@ async def audio_stream(websocket: WebSocket):
     is_after_hours = False
     hours_string = ""
     name_collected = False
-    SILENCE_LIMIT = 20
+    SILENCE_LIMIT = 30
     # Initialize WebRTC VAD
     import webrtcvad as _webrtcvad
     vad = _webrtcvad.Vad(3)  # aggressiveness 3 = most aggressive filtering
 
     try:
         while True:
-            message = await websocket.receive_text()
+            try:
+                message = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                # Send keep-alive to prevent Twilio from closing WebSocket
+                try:
+                    await websocket.send_text(json.dumps({"event": "ping"}))
+                except Exception:
+                    break
+                continue
             data = json.loads(message)
 
             if data["event"] == "start":
@@ -1084,9 +1095,16 @@ async def audio_stream(websocket: WebSocket):
                         is_likely_hallucination = (
                             word_count == 1 and len(transcript_clean) <= 4
                         )
-                        is_noise_description = (
-                            transcript_clean.startswith("(") and transcript_clean.endswith(")")
-                        )
+                        # Filter pure noise descriptions like (static), (silence)
+                        # But keep mixed ones like "(silence) Nope." → extract real part
+                        import re as _re
+                        # Remove parenthetical noise descriptions from transcript
+                        cleaned_transcript = _re.sub(r'\([^)]*\)', '', transcript_clean).strip()
+                        cleaned_transcript = _re.sub(r'\s+', ' ', cleaned_transcript).strip()
+                        is_noise_description = len(cleaned_transcript) < 2
+                        # Use cleaned version if it has content
+                        if cleaned_transcript and len(cleaned_transcript) >= 2:
+                            transcript_clean = cleaned_transcript
                         if transcript_clean and len(transcript_clean) > 2 and not is_likely_hallucination and not is_noise_description:
                             conversation_history.append({"role": "user", "content": transcript})
 
