@@ -809,7 +809,7 @@ async def create_order(request: Request):
         order = client.order.create({
             "amount": amount,
             "currency": "INR",
-            "receipt": f"{user_id}_{plan}_{int(time.time())}",
+            "receipt": f"{user_id[:20]}_{plan[:4]}_{int(time.time()) % 100000}",
             "notes": {
                 "userId": user_id,
                 "plan": plan
