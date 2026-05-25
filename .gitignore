@@ -2,3 +2,5 @@ venv/
 .env
 __pycache__/
 *.pyc
+serviceaccount.json
+update_business.py
