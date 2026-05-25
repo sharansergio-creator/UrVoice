@@ -748,6 +748,39 @@ async def delete_voice(request: Request):
         return {"error": str(e)}
 
 
+@app.post("/analyze-questions")
+async def analyze_questions(request: Request):
+    try:
+        body = await request.json()
+        transcripts = body.get("transcripts", "")
+        if not transcripts:
+            return {"questions": ["No call data available"]}
+
+        prompt = f"""Here are caller transcripts from a resort business phone AI:
+{transcripts}
+
+Identify the top 5 most common questions or topics callers ask about.
+Return ONLY a JSON array of 5 short strings, each under 60 characters.
+Example: ["Room availability and pricing", "Check-in and check-out times"]
+Return only the JSON array, nothing else."""
+
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+
+        import json, re
+        match = re.search(r'\[.*?\]', text, re.DOTALL)
+        if match:
+            questions = json.loads(match.group())
+            return {"questions": questions}
+        return {"questions": ["Could not parse response"]}
+    except Exception as e:
+        print(f"analyze-questions error: {e}")
+        return {"questions": ["Analysis failed"]}
+
+
 @app.get("/")
 def root():
     return {"status": "UrVoice backend running"}
