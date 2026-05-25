@@ -764,18 +764,25 @@ Return ONLY a JSON array of 5 short strings, each under 60 characters.
 Example: ["Room availability and pricing", "Check-in and check-out times"]
 Return only the JSON array, nothing else."""
 
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        response = model.generate_content(prompt)
-        text = response.text.strip()
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=30
+            )
 
-        import json, re
-        match = re.search(r'\[.*?\]', text, re.DOTALL)
-        if match:
-            questions = json.loads(match.group())
-            return {"questions": questions}
-        return {"questions": ["Could not parse response"]}
+        if response.status_code == 200:
+            data = response.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            import re
+            match = re.search(r'\[.*?\]', text, re.DOTALL)
+            if match:
+                import json
+                questions = json.loads(match.group())
+                return {"questions": questions}
+
+        print(f"analyze-questions Gemini error: {response.status_code} {response.text[:200]}")
+        return {"questions": ["Could not analyze questions"]}
     except Exception as e:
         print(f"analyze-questions error: {e}")
         return {"questions": ["Analysis failed"]}
