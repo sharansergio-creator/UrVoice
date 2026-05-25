@@ -43,62 +43,7 @@ Sub-second responses on most turns. First response slightly higher (~2.2s) due t
 
 ## System Architecture
 
-```
-Incoming Call
-     │
-     ▼
-Twilio (+16206596566)
-     │  POST /incoming-call
-     ▼
-FastAPI (Railway)
-     │  Returns TwiML → WebSocket stream
-     ▼
-WebSocket /audio-stream
-     │
-     ├─── [1] Firestore Lookup
-     │         phone_mappings/{number} → userId
-     │         business_context/{userId} → AI prompt
-     │         call_settings/{userId} → answerMode
-     │
-     ├─── [2] Caller Identification
-     │         contact_permissions/{userId}/contacts/{phone}
-     │         → VIP / CUSTOMER / BLOCKED / UNKNOWN
-     │
-     ├─── [3] Audio Input Pipeline
-     │         Twilio mulaw chunks
-     │              ↓
-     │         audioop.ulaw2lin → PCM
-     │              ↓
-     │         WebRTC VAD (aggressiveness=3, 20ms frames)
-     │              ↓ speech detected for 600ms silence
-     │         mulaw_to_wav()
-     │              ↓
-     │         ElevenLabs Scribe STT (~490ms)
-     │              ↓
-     │         Noise/hallucination filter
-     │
-     ├─── [4] AI Response
-     │         Gemini 2.5 Flash + business context (~1050ms)
-     │         max_output_tokens=300
-     │
-     ├─── [5] Audio Output Pipeline
-     │         detect_language(ai_response)
-     │              ↓
-     │         ElevenLabs TTS — cloned voice (~530ms)
-     │         eleven_flash_v2_5 (English)
-     │         eleven_multilingual_v2 (Indian languages)
-     │              ↓
-     │         miniaudio MP3 decode → PCM
-     │         audioop.lin2ulaw → mulaw
-     │         base64 → Twilio media event
-     │
-     └─── [6] Session Logging
-               Firestore call_sessions/{sessionId}
-               exchanges: [{transcript, aiResponse, language}]
-               FCM push → Android app (real-time)
-```
-
----
+![UrVoice Architecture](docs/urvoice_architecture_diagram.svg)
 
 ## Tech Stack
 
