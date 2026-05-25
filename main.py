@@ -18,6 +18,9 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion, Increment, DELETE_FIELD
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+import hmac
+import hashlib
+import time
 
 load_dotenv()
 
@@ -786,6 +789,87 @@ Return only the JSON array, nothing else."""
     except Exception as e:
         print(f"analyze-questions error: {e}")
         return {"questions": ["Analysis failed"]}
+
+
+@app.post("/create-order")
+async def create_order(request: Request):
+    try:
+        body = await request.json()
+        user_id = body.get("userId")
+        plan = body.get("plan")  # "basic" or "premium"
+
+        if not user_id or not plan:
+            raise HTTPException(status_code=400, detail="userId and plan required")
+
+        amount = 99900 if plan == "basic" else 249900  # in paise
+
+        import razorpay
+        client = razorpay.Client(auth=(os.environ.get("RAZORPAY_KEY_ID"), os.environ.get("RAZORPAY_KEY_SECRET")))
+
+        order = client.order.create({
+            "amount": amount,
+            "currency": "INR",
+            "receipt": f"{user_id}_{plan}_{int(time.time())}",
+            "notes": {
+                "userId": user_id,
+                "plan": plan
+            }
+        })
+
+        return {"orderId": order["id"], "amount": amount, "currency": "INR"}
+    except Exception as e:
+        print(f"create-order error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/verify-payment")
+async def verify_payment(request: Request):
+    try:
+        body = await request.json()
+        user_id = body.get("userId")
+        plan = body.get("plan")
+        razorpay_order_id = body.get("razorpayOrderId")
+        razorpay_payment_id = body.get("razorpayPaymentId")
+        razorpay_signature = body.get("razorpaySignature")
+
+        if not all([user_id, plan, razorpay_order_id, razorpay_payment_id, razorpay_signature]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+
+        # Verify signature
+        key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+        message = f"{razorpay_order_id}|{razorpay_payment_id}"
+        generated_signature = hmac.new(
+            key_secret.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        if generated_signature != razorpay_signature:
+            raise HTTPException(status_code=400, detail="Invalid signature")
+
+        # Save subscription to Firestore
+        db = get_db()
+        db.collection("subscriptions").document(user_id).set({
+            "plan": plan,
+            "status": "active",
+            "razorpayOrderId": razorpay_order_id,
+            "razorpayPaymentId": razorpay_payment_id,
+            "startDate": firestore.SERVER_TIMESTAMP,
+            "amount": 99900 if plan == "basic" else 249900
+        })
+
+        # Also update user document
+        db.collection("users").document(user_id).update({
+            "plan": plan,
+            "subscriptionStatus": "active"
+        })
+
+        return {"success": True, "plan": plan}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"verify-payment error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/")
