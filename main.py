@@ -1061,6 +1061,7 @@ async def audio_stream(websocket: WebSocket):
     is_after_hours = False
     hours_string = ""
     name_collected = False
+    contact_saved = False
     SILENCE_LIMIT = 30
     # Initialize WebRTC VAD
     import webrtcvad as _webrtcvad
@@ -1399,6 +1400,30 @@ async def audio_stream(websocket: WebSocket):
                             update_data["category"] = "AFTER_HOURS"
                         session_doc_ref.update(update_data)
                         print(f"Session {session_id} completed with {len(exchanges)} exchange(s)")
+
+                        if caller_name and caller_name != "Unknown" and caller_number:
+                            try:
+                                db = get_db()
+                                contact_ref = db.collection("contact_permissions").document(business_user_id)\
+                                    .collection("contacts").document(caller_number)
+                                contact_doc = contact_ref.get()
+                                if not contact_doc.exists:
+                                    contact_ref.set({
+                                        "name": caller_name,
+                                        "type": "CUSTOMER",
+                                        "firstCall": firestore.SERVER_TIMESTAMP,
+                                        "lastCall": firestore.SERVER_TIMESTAMP,
+                                        "totalCalls": 1
+                                    })
+                                else:
+                                    contact_ref.update({
+                                        "lastCall": firestore.SERVER_TIMESTAMP,
+                                        "totalCalls": firestore.Increment(1)
+                                    })
+                                contact_saved = True
+                                print(f"Contact saved: {caller_name} ({caller_number})")
+                            except Exception as e:
+                                print(f"Contact save error: {e}")
                     except Exception as e:
                         print(f"Session close error: {e}")
                 break
@@ -1418,6 +1443,30 @@ async def audio_stream(websocket: WebSocket):
                 db = get_db()
                 db.collection("call_sessions").document(session_id).update(update_data)
                 print(f"Session {session_id} completed with {len(exchanges)} exchanges")
+
+                if not contact_saved and caller_name and caller_name != "Unknown" and caller_number:
+                    try:
+                        contact_ref = db.collection("contact_permissions").document(business_user_id)\
+                            .collection("contacts").document(caller_number)
+                        contact_doc = contact_ref.get()
+                        if not contact_doc.exists:
+                            contact_ref.set({
+                                "name": caller_name,
+                                "type": "CUSTOMER",
+                                "firstCall": firestore.SERVER_TIMESTAMP,
+                                "lastCall": firestore.SERVER_TIMESTAMP,
+                                "totalCalls": 1
+                            })
+                        else:
+                            contact_ref.update({
+                                "lastCall": firestore.SERVER_TIMESTAMP,
+                                "totalCalls": firestore.Increment(1)
+                            })
+                        contact_saved = True
+                        print(f"Contact saved: {caller_name} ({caller_number})")
+                    except Exception as e:
+                        print(f"Contact save error: {e}")
+
                 asyncio.create_task(send_fcm_notification(
                     business_user_id,
                     "📋 Call Completed",
