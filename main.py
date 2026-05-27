@@ -1401,7 +1401,29 @@ async def audio_stream(websocket: WebSocket):
                         session_doc_ref.update(update_data)
                         print(f"Session {session_id} completed with {len(exchanges)} exchange(s)")
 
-                        if caller_name and caller_name != "Unknown" and caller_number:
+                        # Extract caller name from conversation if not already known
+                        if (not caller_name or caller_name == "Unknown") and exchanges:
+                            for exchange in exchanges:
+                                transcript = exchange.get("transcript", "")
+                                ai_response = exchange.get("aiResponse", "")
+                                # Look for name patterns in AI response
+                                import re
+                                name_patterns = [
+                                    r"Thank you,\s+([A-Z][a-z]+)",
+                                    r"Welcome back,?\s+([A-Z][a-z]+)",
+                                    r"Nice to meet you,?\s+([A-Z][a-z]+)",
+                                    r"Hello,?\s+([A-Z][a-z]+)",
+                                ]
+                                for pattern in name_patterns:
+                                    match = re.search(pattern, ai_response)
+                                    if match:
+                                        caller_name = match.group(1)
+                                        print(f"Extracted caller name from conversation: {caller_name}")
+                                        break
+                                if caller_name and caller_name != "Unknown":
+                                    break
+
+                        if caller_number and business_user_id:
                             try:
                                 db = get_db()
                                 contact_ref = db.collection("contact_permissions").document(business_user_id)\
@@ -1409,17 +1431,21 @@ async def audio_stream(websocket: WebSocket):
                                 contact_doc = contact_ref.get()
                                 if not contact_doc.exists:
                                     contact_ref.set({
-                                        "name": caller_name,
+                                        "name": caller_name or "Unknown",
                                         "type": "CUSTOMER",
                                         "firstCall": firestore.SERVER_TIMESTAMP,
                                         "lastCall": firestore.SERVER_TIMESTAMP,
                                         "totalCalls": 1
                                     })
                                 else:
-                                    contact_ref.update({
+                                    update_contact = {
                                         "lastCall": firestore.SERVER_TIMESTAMP,
                                         "totalCalls": firestore.Increment(1)
-                                    })
+                                    }
+                                    if caller_name and caller_name != "Unknown":
+                                        update_contact["name"] = caller_name
+                                        update_contact["type"] = "CUSTOMER"
+                                    contact_ref.update(update_contact)
                                 contact_saved = True
                                 print(f"Contact saved: {caller_name} ({caller_number})")
                             except Exception as e:
@@ -1444,24 +1470,50 @@ async def audio_stream(websocket: WebSocket):
                 db.collection("call_sessions").document(session_id).update(update_data)
                 print(f"Session {session_id} completed with {len(exchanges)} exchanges")
 
-                if not contact_saved and caller_name and caller_name != "Unknown" and caller_number:
+                # Extract caller name from conversation if not already known
+                if (not caller_name or caller_name == "Unknown") and exchanges:
+                    for exchange in exchanges:
+                        transcript = exchange.get("transcript", "")
+                        ai_response = exchange.get("aiResponse", "")
+                        # Look for name patterns in AI response
+                        import re
+                        name_patterns = [
+                            r"Thank you,\s+([A-Z][a-z]+)",
+                            r"Welcome back,?\s+([A-Z][a-z]+)",
+                            r"Nice to meet you,?\s+([A-Z][a-z]+)",
+                            r"Hello,?\s+([A-Z][a-z]+)",
+                        ]
+                        for pattern in name_patterns:
+                            match = re.search(pattern, ai_response)
+                            if match:
+                                caller_name = match.group(1)
+                                print(f"Extracted caller name from conversation: {caller_name}")
+                                break
+                        if caller_name and caller_name != "Unknown":
+                            break
+
+                if not contact_saved and caller_number and business_user_id:
                     try:
                         contact_ref = db.collection("contact_permissions").document(business_user_id)\
                             .collection("contacts").document(caller_number)
                         contact_doc = contact_ref.get()
                         if not contact_doc.exists:
                             contact_ref.set({
-                                "name": caller_name,
+                                "name": caller_name or "Unknown",
                                 "type": "CUSTOMER",
                                 "firstCall": firestore.SERVER_TIMESTAMP,
                                 "lastCall": firestore.SERVER_TIMESTAMP,
                                 "totalCalls": 1
                             })
                         else:
-                            contact_ref.update({
+                            update_contact = {
                                 "lastCall": firestore.SERVER_TIMESTAMP,
                                 "totalCalls": firestore.Increment(1)
-                            })
+                            }
+                            if caller_name and caller_name != "Unknown":
+                                update_contact["name"] = caller_name
+                                update_contact["type"] = "CUSTOMER"
+                            contact_ref.update(update_contact)
                         contact_saved = True
                         print(f"Contact saved: {caller_name} ({caller_number})")
                     except Exception as e:
