@@ -226,8 +226,6 @@ UrVoice/ (Android)
 
 ## Planned Features
 
-- [ ] Razorpay subscription billing (Basic ₹999/month, Premium ₹2499/month)
-- [ ] Call analytics dashboard (peak hours, common queries via Gemini)
 - [ ] Native Kannada voice cloning (pending ElevenLabs Professional Voice Cloning support)
 - [ ] WhatsApp follow-up after missed calls
 - [ ] Custom LLM selection (Gemini / Claude / GPT per business)
@@ -236,7 +234,7 @@ UrVoice/ (Android)
 
 ## Built By
 
-**Sharan** — BCA (Data Science), Srinivas Institute of Technology, Mangalore.
+**Sharan S** — BCA (Data Science), Srinivas Institute of Technology, Mangalore.
 
 [GitHub](https://github.com/sharansergio-creator) · [LinkedIn](https://linkedin.com/in/sharansergio)
 
