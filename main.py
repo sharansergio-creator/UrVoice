@@ -1532,21 +1532,15 @@ async def send_audio_response(websocket: WebSocket, stream_sid: str, text: str, 
     try:
         import time
         total_start = time.time()
-        audio_bytes = await text_to_speech(text, user_id)
+        audio_bytes, use_elevenlabs = await text_to_speech(text, user_id)
         if not audio_bytes:
             return
 
         # text_to_speech returns the correct format:
         # - ElevenLabs pcm_22050: raw 16-bit PCM at 22050Hz (needs resample + mulaw)
         # - Sarvam: raw 16-bit PCM at 8000Hz (needs mulaw conversion only)
-        # We detect which by checking if user_id resulted in ElevenLabs usage
+        # use_elevenlabs is set directly by text_to_speech() and avoids a second TTS decision path
         language = detect_language(text)
-        # Check if user has any voice clone (determines decode path)
-        has_voice_clone = False
-        if user_id:
-            en_voice = await get_elevenlabs_voice_id(user_id, "en")
-            has_voice_clone = en_voice is not None
-        use_elevenlabs = has_voice_clone
 
         if use_elevenlabs:
             try:
@@ -1634,7 +1628,7 @@ def detect_language(text: str) -> str:
         return "te-IN"
     return "en-IN"
 
-async def text_to_speech(text: str, user_id: str = None) -> bytes:
+async def text_to_speech(text: str, user_id: str = None) -> tuple[bytes, bool]:
     language = detect_language(text)
 
     if user_id and ELEVENLABS_API_KEY:
@@ -1659,10 +1653,11 @@ async def text_to_speech(text: str, user_id: str = None) -> bytes:
             elevenlabs_audio = await elevenlabs_tts(text, voice_id)
             if elevenlabs_audio:
                 print(f"Using cloned voice for {language} (clone: {clone_key})")
-                return elevenlabs_audio
+                return elevenlabs_audio, True
 
     print(f"Using Sarvam TTS for language: {language}")
-    return await sarvam_tts(text, language)
+    sarvam_audio = await sarvam_tts(text, language)
+    return sarvam_audio, False
 
 async def sarvam_tts(text: str, language_code: str) -> bytes:
     try:
