@@ -1679,7 +1679,7 @@ async def sarvam_tts(text: str, language_code: str) -> bytes:
                     "inputs": [text],
                     "target_language_code": language_code,
                     "speaker": "anushka",
-                    "model": "bulbul:v2",
+                    "model": "bulbul:v3",
                     "speech_sample_rate": 8000,
                     "enable_preprocessing": True,
                     "output_audio_codec": "wav",
