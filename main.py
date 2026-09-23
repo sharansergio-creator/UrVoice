@@ -1678,7 +1678,7 @@ async def sarvam_tts(text: str, language_code: str) -> bytes:
                 json={
                     "inputs": [text],
                     "target_language_code": language_code,
-                    "speaker": "anushka",
+                    "speaker": "priya",
                     "model": "bulbul:v3",
                     "speech_sample_rate": 8000,
                     "enable_preprocessing": True,
